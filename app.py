@@ -1184,7 +1184,7 @@ with aba_viagens:
                 )
 
 with v_col2:
-    st.markdown("### 📋 CRONOGRAMA DE VIAGENS PARA EXAMINADORES")
+    st.markdown("### 📋 CRONOGRAMA DE VIAGENS PROGRAMADAS")
 
     if "viagens_registradas" not in st.session_state:
         st.session_state["viagens_registradas"] = []
@@ -1192,79 +1192,70 @@ with v_col2:
     if not st.session_state["viagens_registradas"]:
         st.warning("Nenhuma viagem cadastrada até o momento.")
     else:
-        from datetime import datetime
-        import pandas as pd
+        from datetime import datetime, date
 
-        # 1. Ajuste de tipos de data para prevenir erros no sistema
+        # 1. Garante que as datas fiquem em formato date sem quebrar o restante do app
         for v in st.session_state["viagens_registradas"]:
             if isinstance(v.get("Data Inicio"), str):
                 v["Data Inicio"] = datetime.strptime(v["Data Inicio"][:10], "%Y-%m-%d").date()
             if isinstance(v.get("Data Fim"), str):
                 v["Data Fim"] = datetime.strptime(v["Data Fim"][:10], "%Y-%m-%d").date()
 
-        # 2. Agrupa as viagens por Banca Principal
-        bancas = sorted(list({v.get("Banca", "Banca São Luís") for v in st.session_state["viagens_registradas"]}))
+        # 2. Agrupa por Banca Principal
+        bancas_unicas = sorted(list({v.get("Banca", "Banca São Luís") for v in st.session_state["viagens_registradas"]}))
 
-        for banca in bancas:
+        for banca in bancas_unicas:
+            # Filtra e ordena as viagens por Data de Início
             viagens_banca = [v for v in st.session_state["viagens_registradas"] if v.get("Banca") == banca]
-            
-            # Cabeçalho Amarelo estilo Cronograma Oficial
+            viagens_banca.sort(key=lambda x: x["Data Inicio"])
+
+            # Cabeçalho AZUL estilo cronograma institucional
+            mes_txt = st.session_state.get('mes_selecionado', 'NOVEMBRO').upper()
             st.markdown(
                 f"""
-                <div style="background-color: #FFFF00; color: #000000; padding: 6px; font-weight: bold; text-align: center; border: 1px solid #000; font-size: 14px; text-transform: uppercase;">
-                    MÊS DE {st.session_state.get('mes_selecionado', 'NOVEMBRO').upper()} - {banca.upper()}
+                <div style="background-color: #2B579A; color: #FFFFFF; padding: 8px; font-weight: bold; text-align: center; border-radius: 4px; font-size: 14px; text-transform: uppercase; margin-top: 10px; margin-bottom: 10px;">
+                    MÊS DE {mes_txt} — {banca.upper()}
                 </div>
                 """,
                 unsafe_allow_html=True
             )
 
-            # Prepara dados no formato do quadro (Semana | Viagens | Quantidade de examinadores | Veículos)
-            dados_tabela = []
+            # Lista e formulários dinâmicos de edição por viagem
             for v in viagens_banca:
-                dt_in = v.get("Data Inicio")
-                dt_fim = v.get("Data Fim")
+                # Localiza a posição real na lista global
+                idx_global = st.session_state["viagens_registradas"].index(v)
                 
-                # Formata a semana (ex: 05 a 09)
-                semana_str = f"{dt_in.strftime('%d')} a {dt_fim.strftime('%d')}" if dt_in and dt_fim else ""
+                num_banca_it = int(v.get("Numero Banca Itinerante", 1))
+                destino_muni = v.get("Destino", "Município")
                 
-                qtd_ex = v.get("Examinadores", 0)
-                preposto = 1 if v.get("Apoio Conjunto") else 0
-                txt_ex = f"{qtd_ex} Examinadores + {preposto} preposto = {qtd_ex + preposto}" if preposto else f"{qtd_ex} Examinadores"
+                with st.container():
+                    st.markdown(f"**📍 {destino_muni}** *(Vinculado à Banca {num_banca_it:02d})*")
+                    
+                    col_dt1, col_dt2, col_bnc, col_ex = st.columns([2, 2, 1.5, 1.5])
+                    
+                    # Entradas de data no formato dd/mm/aaaa
+                    nova_dt_in = col_dt1.date_input("Início", value=v["Data Inicio"], format="DD/MM/YYYY", key=f"dt_in_{idx_global}")
+                    nova_dt_fim = col_dt2.date_input("Término", value=v["Data Fim"], format="DD/MM/YYYY", key=f"dt_fim_{idx_global}")
+                    novo_num_banca = col_bnc.number_input("Nº Banca", value=num_banca_it, min_value=1, key=f"num_{idx_global}")
+                    novos_ex = col_ex.number_input("Examinadores", value=int(v.get("Examinadores", 1)), min_value=1, key=f"ex_{idx_global}")
 
-                dados_tabela.append({
-                    "Semana": semana_str,
-                    "Viagens": v.get("Destino", ""),
-                    "Quantidade de examinadores e prepostos": txt_ex,
-                    "Quantidade de veículos": 1
-                })
+                    # Atualização em tempo real das alterações feitas
+                    if (nova_dt_in != v["Data Inicio"] or nova_dt_fim != v["Data Fim"] or 
+                        novo_num_banca != v.get("Numero Banca Itinerante") or novos_ex != v.get("Examinadores")):
+                        
+                        v["Data Inicio"] = nova_dt_in
+                        v["Data Fim"] = nova_dt_fim
+                        v["Numero Banca Itinerante"] = novo_num_banca
+                        v["Examinadores"] = novos_ex
+                        v["Período"] = f"{nova_dt_in.strftime('%d/%m/%Y')} até {nova_dt_fim.strftime('%d/%m/%Y')}"
+                        st.rerun()
 
-            df_quadro = pd.DataFrame(dados_tabela)
+                    col_del, _ = st.columns([2, 8])
+                    if col_del.button("🗑️ Remover", key=f"del_{idx_global}"):
+                        st.session_state["viagens_registradas"].pop(idx_global)
+                        st.rerun()
 
-            # Exibe a tabela interativa e editável
-            df_editado = st.data_editor(
-                df_quadro,
-                num_rows="fixed",
-                use_container_width=True,
-                hide_index=True,
-                key=f"quadro_{banca}"
-            )
-            
-            st.markdown("<br>", unsafe_allow_html=True)
-
-        st.divider()
-
-        # Menu para exclusão de viagens salvas
-        opcoes_remocao = {
-            f"{v.get('Banca')} — {v.get('Destino')} ({v.get('Data Inicio')})": idx
-            for idx, v in enumerate(st.session_state["viagens_registradas"])
-        }
-
-        if opcoes_remocao:
-            viagem_selecionada = st.selectbox("Selecione uma viagem para remover:", list(opcoes_remocao.keys()))
-            if st.button("🗑️ Cancelar Viagem Selecionada"):
-                idx_remover = opcoes_remocao[viagem_selecionada]
-                st.session_state["viagens_registradas"].pop(idx_remover)
-                st.rerun()
+                    st.markdown("---")
 
 # --- ABA: MONTAR CALENDÁRIO ---
 with aba_cal:
