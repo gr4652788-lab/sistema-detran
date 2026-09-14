@@ -1184,7 +1184,7 @@ with aba_viagens:
                 )
 
 with v_col2:
-    st.markdown("#### 📋 Viagens Programadas")
+    st.markdown("### 📋 CRONOGRAMA DE VIAGENS PARA EXAMINADORES")
 
     if "viagens_registradas" not in st.session_state:
         st.session_state["viagens_registradas"] = []
@@ -1192,46 +1192,70 @@ with v_col2:
     if not st.session_state["viagens_registradas"]:
         st.warning("Nenhuma viagem cadastrada até o momento.")
     else:
+        from datetime import datetime
         import pandas as pd
-        from datetime import datetime, date
 
-        # Prepara os dados convertendo datas para objetos date nativos
-        dados_formatados = []
+        # 1. Ajuste de tipos de data para prevenir erros no sistema
         for v in st.session_state["viagens_registradas"]:
-            item = dict(v)
-            if isinstance(item.get("Data Inicio"), str):
-                item["Data Inicio"] = datetime.strptime(item["Data Inicio"][:10], "%Y-%m-%d").date()
-            if isinstance(item.get("Data Fim"), str):
-                item["Data Fim"] = datetime.strptime(item["Data Fim"][:10], "%Y-%m-%d").date()
-            dados_formatados.append(item)
+            if isinstance(v.get("Data Inicio"), str):
+                v["Data Inicio"] = datetime.strptime(v["Data Inicio"][:10], "%Y-%m-%d").date()
+            if isinstance(v.get("Data Fim"), str):
+                v["Data Fim"] = datetime.strptime(v["Data Fim"][:10], "%Y-%m-%d").date()
 
-        df_viagens = pd.DataFrame(dados_formatados)
+        # 2. Agrupa as viagens por Banca Principal
+        bancas = sorted(list({v.get("Banca", "Banca São Luís") for v in st.session_state["viagens_registradas"]}))
 
-        # 1. Tabela editável diretamente nas células
-        df_editado = st.data_editor(
-            df_viagens,
-            num_rows="fixed",
-            use_container_width=True,
-            hide_index=True,
-            key="editor_viagens_seguro"
-        )
+        for banca in bancas:
+            viagens_banca = [v for v in st.session_state["viagens_registradas"] if v.get("Banca") == banca]
+            
+            # Cabeçalho Amarelo estilo Cronograma Oficial
+            st.markdown(
+                f"""
+                <div style="background-color: #FFFF00; color: #000000; padding: 6px; font-weight: bold; text-align: center; border: 1px solid #000; font-size: 14px; text-transform: uppercase;">
+                    MÊS DE {st.session_state.get('mes_selecionado', 'NOVEMBRO').upper()} - {banca.upper()}
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
 
-        # Atualiza o session_state garantindo que 'Data Inicio' e 'Data Fim' fiquem como date
-        novas_viagens = []
-        for reg in df_editado.to_dict("records"):
-            if isinstance(reg["Data Inicio"], pd.Timestamp):
-                reg["Data Inicio"] = reg["Data Inicio"].date()
-            if isinstance(reg["Data Fim"], pd.Timestamp):
-                reg["Data Fim"] = reg["Data Fim"].date()
-            novas_viagens.append(reg)
+            # Prepara dados no formato do quadro (Semana | Viagens | Quantidade de examinadores | Veículos)
+            dados_tabela = []
+            for v in viagens_banca:
+                dt_in = v.get("Data Inicio")
+                dt_fim = v.get("Data Fim")
+                
+                # Formata a semana (ex: 05 a 09)
+                semana_str = f"{dt_in.strftime('%d')} a {dt_fim.strftime('%d')}" if dt_in and dt_fim else ""
+                
+                qtd_ex = v.get("Examinadores", 0)
+                preposto = 1 if v.get("Apoio Conjunto") else 0
+                txt_ex = f"{qtd_ex} Examinadores + {preposto} preposto = {qtd_ex + preposto}" if preposto else f"{qtd_ex} Examinadores"
 
-        st.session_state["viagens_registradas"] = novas_viagens
+                dados_tabela.append({
+                    "Semana": semana_str,
+                    "Viagens": v.get("Destino", ""),
+                    "Quantidade de examinadores e prepostos": txt_ex,
+                    "Quantidade de veículos": 1
+                })
+
+            df_quadro = pd.DataFrame(dados_tabela)
+
+            # Exibe a tabela interativa e editável
+            df_editado = st.data_editor(
+                df_quadro,
+                num_rows="fixed",
+                use_container_width=True,
+                hide_index=True,
+                key=f"quadro_{banca}"
+            )
+            
+            st.markdown("<br>", unsafe_allow_html=True)
 
         st.divider()
 
-        # 2. Exclusão rápida mantida
+        # Menu para exclusão de viagens salvas
         opcoes_remocao = {
-            f"Banca {int(v.get('Numero Banca Itinerante', 1)):02d} - {v.get('Destino')} ({v.get('Data Inicio')})": idx
+            f"{v.get('Banca')} — {v.get('Destino')} ({v.get('Data Inicio')})": idx
             for idx, v in enumerate(st.session_state["viagens_registradas"])
         }
 
