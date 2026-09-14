@@ -1183,92 +1183,66 @@ with aba_viagens:
                     f"Período: {turno_v}."
                 )
 
-    with v_col2:
-        st.markdown("#### 📋 Viagens Programadas")
-        if not st.session_state["viagens_registradas"]:
-            st.warning("Nenhuma viagem cadastrada até o momento.")
-        else:
-            viagens_df_list = []
-            for idx_v, v in enumerate(st.session_state["viagens_registradas"]):
-                banca_str = (
-                    f"{v['Banca']} + Timon"
-                    if v.get("Apoio Conjunto") and v["Banca"] == "Banca Caxias"
-                    else (
-                        f"{v['Banca']} + Caxias"
-                        if v.get("Apoio Conjunto") and v["Banca"] == "Banca Timon"
-                        else v["Banca"]
-                    )
-                )
-                viagens_df_list.append({
-                    "ID": idx_v + 1,
-                    "Banca": v["Banca"],
-                    "Banca (exibição)": banca_str,
-                    "Numero Banca Itinerante": v["Numero Banca Itinerante"],
-                    "Destino": v["Destino"],
-                    "Data Inicio": v["Data Inicio"],
-                    "Período": (
-                        f"{v['Data Inicio'].strftime('%d/%m/%Y')} até {v['Data Fim'].strftime('%d/%m/%Y')}"
-                        f" — {v.get('Turno', 'Dia inteiro')}"
-                    ),
-                    "Examinadores": v["Examinadores"],
-                    "Observações": v["Observações"],
-                })
+with v_col2:
+    st.markdown("#### 📋 Viagens Programadas")
+    
+    if not st.session_state.get("viagens_registradas"):
+        st.warning("Nenhuma viagem cadastrada até o momento.")
+    elif not HAS_CALENDAR_COMPONENT:
+        st.error("O componente 'streamlit-calendar' não está instalado no ambiente.")
+    else:
+        # Monta os eventos para o calendário a partir de st.session_state["viagens_registradas"]
+        eventos_calendario = []
+        for idx_v, v in enumerate(st.session_state["viagens_registradas"]):
+            banca_nome = v.get("Banca", "Banca")
+            destino_nome = v.get("Destino", "")
+            qtd_ex = v.get("Examinadores", 0)
+            
+            eventos_calendario.append({
+                "id": str(idx_v),
+                "title": f"{banca_nome} - {destino_nome} ({qtd_ex} ex.)",
+                "start": str(v.get("Data Inicio")),
+                "end": str(v.get("Data Fim")),
+                "backgroundColor": "#2B579A",
+            })
 
-            df_viagens = pd.DataFrame(viagens_df_list)
+        if "cal_key" not in st.session_state:
+            import uuid
+            st.session_state.cal_key = str(uuid.uuid4())
 
-            for banca_nome in st.session_state["bancas_config"].keys():
-                df_banca_viagens = df_viagens[df_viagens["Banca"] == banca_nome]
-                if df_banca_viagens.empty:
-                    continue
+        calendar_options = {
+            "editable": True,            # Ativa a função de arrastar e reordenar
+            "selectable": True,
+            "headerToolbar": {
+                "left": "prev,next today",
+                "center": "title",
+                "right": "dayGridMonth"
+            },
+            "initialView": "dayGridMonth",
+            "locale": "pt-br",
+        }
 
-                qtd_viagens_banca = len(df_banca_viagens)
-                rotulo_viagem = "viagem" if qtd_viagens_banca == 1 else "viagens"
-                with st.expander(
-                    f"🏛️ {banca_nome} ({qtd_viagens_banca} {rotulo_viagem})",
-                    expanded=True,
-                ):
-                    numeros_da_banca = sorted(
-                        df_banca_viagens["Numero Banca Itinerante"].unique()
-                    )
-                    for numero in numeros_da_banca:
-                        df_time = df_banca_viagens[
-                            df_banca_viagens["Numero Banca Itinerante"] == numero
-                        ].sort_values("Data Inicio")
+        # Chama a função usando st_calendar (conforme importado no topo)
+        cal_state = st_calendar(
+            events=eventos_calendario,
+            options=calendar_options,
+            key=st.session_state.cal_key
+        )
 
-                        nome_banca_sem_prefixo = banca_nome.replace("Banca ", "")
-                        sufixo_conjunto = (
-                            df_time["Banca (exibição)"].iloc[0].replace(banca_nome, "")
-                        )
-                        st.markdown(
-                            f"**🚌 Banca {numero:02d} de {nome_banca_sem_prefixo}"
-                            f"{sufixo_conjunto}** — {int(df_time['Examinadores'].iloc[0])}"
-                            " examinadores"
-                        )
-                        st.dataframe(
-                            df_time[
-                                ["Destino", "Período", "Examinadores", "Observações"]
-                            ],
-                            use_container_width=True,
-                            hide_index=True,
-                        )
+        # Captura o arrasta-e-solta no calendário e atualiza a lista interna
+        if cal_state and cal_state.get("eventChange"):
+            evento_movido = cal_state["eventChange"]["event"]
+            idx = int(evento_movido["id"])
+            
+            nova_data_inicio = evento_movido["start"][:10]
+            nova_data_fim = evento_movido.get("end", nova_data_inicio)[:10]
 
-            st.markdown("---")
+            st.session_state["viagens_registradas"][idx]["Data Inicio"] = nova_data_inicio
+            st.session_state["viagens_registradas"][idx]["Data Fim"] = nova_data_fim
 
-            opcoes_remocao = {
-                (
-                    f"Banca {int(row['Numero Banca Itinerante']):02d} de"
-                    f" {row['Banca'].replace('Banca ', '')} — {row['Destino']}"
-                    f" ({row['Período']})"
-                ): row["ID"]
-                for _, row in df_viagens.iterrows()
-            }
-            rotulo_selecionado = st.selectbox(
-                "Selecione uma viagem para remover:", list(opcoes_remocao.keys())
-            )
-            if st.button("🗑️ Cancelar Viagem Selecionada"):
-                v_rem = opcoes_remocao[rotulo_selecionado]
-                st.session_state["viagens_registradas"].pop(v_rem - 1)
-                st.rerun()
+            import uuid
+            st.session_state.cal_key = str(uuid.uuid4())
+            st.rerun()
 
 # --- ABA: GERENCIAR HORÁRIOS ---
 with aba_horarios:
