@@ -1193,45 +1193,54 @@ with v_col2:
         st.warning("Nenhuma viagem cadastrada até o momento.")
     else:
         import pandas as pd
+        from datetime import datetime, date
 
-        # Converte as viagens salvas em DataFrame
-        df_viagens = pd.DataFrame(st.session_state["viagens_registradas"])
+        # Prepara os dados convertendo datas para objetos date nativos
+        dados_formatados = []
+        for v in st.session_state["viagens_registradas"]:
+            item = dict(v)
+            if isinstance(item.get("Data Inicio"), str):
+                item["Data Inicio"] = datetime.strptime(item["Data Inicio"][:10], "%Y-%m-%d").date()
+            if isinstance(item.get("Data Fim"), str):
+                item["Data Fim"] = datetime.strptime(item["Data Fim"][:10], "%Y-%m-%d").date()
+            dados_formatados.append(item)
 
-        st.caption("💡 **Dica:** Clique em qualquer célula abaixo para editar datas, bancas ou destinos diretamente.")
+        df_viagens = pd.DataFrame(dados_formatados)
 
-        # Tabela totalmente editável em tempo real
+        # 1. Tabela editável diretamente nas células
         df_editado = st.data_editor(
             df_viagens,
-            num_rows="dynamic", # Permite adicionar ou excluir linhas na tabela
+            num_rows="fixed",
             use_container_width=True,
             hide_index=True,
-            key="editor_viagens_dinamico"
+            key="editor_viagens_seguro"
         )
 
-        # Sincroniza as edições feitas na tela de volta para o sistema
-        st.session_state["viagens_registradas"] = df_editado.to_dict("records")
+        # Atualiza o session_state garantindo que 'Data Inicio' e 'Data Fim' fiquem como date
+        novas_viagens = []
+        for reg in df_editado.to_dict("records"):
+            if isinstance(reg["Data Inicio"], pd.Timestamp):
+                reg["Data Inicio"] = reg["Data Inicio"].date()
+            if isinstance(reg["Data Fim"], pd.Timestamp):
+                reg["Data Fim"] = reg["Data Fim"].date()
+            novas_viagens.append(reg)
 
-# --- ABA: GERENCIAR HORÁRIOS ---
-with aba_horarios:
-    st.markdown("### ⏰ Cadastro e Edição de Horários das Turmas")
-    col1, col2 = st.columns(2)
-    with col1:
-        novo_h = st.text_input(
-            "Adicionar novo horário (Formato HH:MM):", placeholder="Ex: 07:30"
-        )
-        if st.button("Adicionar Horário"):
-            if novo_h and novo_h not in st.session_state["lista_horarios"]:
-                st.session_state["lista_horarios"].append(novo_h)
-                st.session_state["lista_horarios"].sort()
-                st.success(f"Horário {novo_h} adicionado com sucesso!")
+        st.session_state["viagens_registradas"] = novas_viagens
 
-    with col2:
-        h_remover = st.selectbox(
-            "Remover horário existente:", st.session_state["lista_horarios"]
-        )
-        if st.button("Remover Horário"):
-            st.session_state["lista_horarios"].remove(h_remover)
-            st.warning(f"Horário {h_remover} removido!")
+        st.divider()
+
+        # 2. Exclusão rápida mantida
+        opcoes_remocao = {
+            f"Banca {int(v.get('Numero Banca Itinerante', 1)):02d} - {v.get('Destino')} ({v.get('Data Inicio')})": idx
+            for idx, v in enumerate(st.session_state["viagens_registradas"])
+        }
+
+        if opcoes_remocao:
+            viagem_selecionada = st.selectbox("Selecione uma viagem para remover:", list(opcoes_remocao.keys()))
+            if st.button("🗑️ Cancelar Viagem Selecionada"):
+                idx_remover = opcoes_remocao[viagem_selecionada]
+                st.session_state["viagens_registradas"].pop(idx_remover)
+                st.rerun()
 
 # --- ABA: MONTAR CALENDÁRIO ---
 with aba_cal:
