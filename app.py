@@ -1185,64 +1185,31 @@ with aba_viagens:
 
 with v_col2:
     st.markdown("#### 📋 Viagens Programadas")
-    
-    if not st.session_state.get("viagens_registradas"):
+
+    if "viagens_registradas" not in st.session_state:
+        st.session_state["viagens_registradas"] = []
+
+    if not st.session_state["viagens_registradas"]:
         st.warning("Nenhuma viagem cadastrada até o momento.")
-    elif not HAS_CALENDAR_COMPONENT:
-        st.error("O componente 'streamlit-calendar' não está instalado no ambiente.")
     else:
-        # Monta os eventos para o calendário a partir de st.session_state["viagens_registradas"]
-        eventos_calendario = []
-        for idx_v, v in enumerate(st.session_state["viagens_registradas"]):
-            banca_nome = v.get("Banca", "Banca")
-            destino_nome = v.get("Destino", "")
-            qtd_ex = v.get("Examinadores", 0)
-            
-            eventos_calendario.append({
-                "id": str(idx_v),
-                "title": f"{banca_nome} - {destino_nome} ({qtd_ex} ex.)",
-                "start": str(v.get("Data Inicio")),
-                "end": str(v.get("Data Fim")),
-                "backgroundColor": "#2B579A",
-            })
+        import pandas as pd
 
-        if "cal_key" not in st.session_state:
-            import uuid
-            st.session_state.cal_key = str(uuid.uuid4())
+        # Converte as viagens salvas em DataFrame
+        df_viagens = pd.DataFrame(st.session_state["viagens_registradas"])
 
-        calendar_options = {
-            "editable": True,            # Ativa a função de arrastar e reordenar
-            "selectable": True,
-            "headerToolbar": {
-                "left": "prev,next today",
-                "center": "title",
-                "right": "dayGridMonth"
-            },
-            "initialView": "dayGridMonth",
-            "locale": "pt-br",
-        }
+        st.caption("💡 **Dica:** Clique em qualquer célula abaixo para editar datas, bancas ou destinos diretamente.")
 
-        # Chama a função usando st_calendar (conforme importado no topo)
-        cal_state = st_calendar(
-            events=eventos_calendario,
-            options=calendar_options,
-            key=st.session_state.cal_key
+        # Tabela totalmente editável em tempo real
+        df_editado = st.data_editor(
+            df_viagens,
+            num_rows="dynamic", # Permite adicionar ou excluir linhas na tabela
+            use_container_width=True,
+            hide_index=True,
+            key="editor_viagens_dinamico"
         )
 
-        # Captura o arrasta-e-solta no calendário e atualiza a lista interna
-        if cal_state and cal_state.get("eventChange"):
-            evento_movido = cal_state["eventChange"]["event"]
-            idx = int(evento_movido["id"])
-            
-            nova_data_inicio = evento_movido["start"][:10]
-            nova_data_fim = evento_movido.get("end", nova_data_inicio)[:10]
-
-            st.session_state["viagens_registradas"][idx]["Data Inicio"] = nova_data_inicio
-            st.session_state["viagens_registradas"][idx]["Data Fim"] = nova_data_fim
-
-            import uuid
-            st.session_state.cal_key = str(uuid.uuid4())
-            st.rerun()
+        # Sincroniza as edições feitas na tela de volta para o sistema
+        st.session_state["viagens_registradas"] = df_editado.to_dict("records")
 
 # --- ABA: GERENCIAR HORÁRIOS ---
 with aba_horarios:
