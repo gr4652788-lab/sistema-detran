@@ -14,6 +14,13 @@ from reportlab.lib.pagesizes import landscape, letter
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Table, TableStyle
 
+# Tenta importar streamlit_calendar com graceful fallback
+try:
+    from streamlit_calendar import calendar as st_calendar
+    HAS_CALENDAR_COMPONENT = True
+except ImportError:
+    HAS_CALENDAR_COMPONENT = False
+
 # Configuração da página
 st.set_page_config(
     page_title="DETRAN/MA - Gestão de Exames Práticos",
@@ -1479,6 +1486,71 @@ with aba_cal:
         df_completo = pd.DataFrame(registros_merged)
     else:
         df_completo = df_base.copy()
+
+    # --- COMPONENTE VISUAL DO CALENDÁRIO ---
+    st.markdown("### 📅 Visualização em Calendário Interativo")
+    if HAS_CALENDAR_COMPONENT:
+        events = []
+        # Renderiza viagens cadastradas da banca selecionada
+        for v in st.session_state["viagens_registradas"]:
+            if v["Banca"] == banca_sel or (v.get("Apoio Conjunto") and banca_sel in ["Banca Caxias", "Banca Timon"]):
+                events.append({
+                    "title": f"🚍 Viagem: {v['Destino']} ({v['Examinadores']} Ex.)",
+                    "start": v["Data Inicio"].isoformat(),
+                    "end": (v["Data Fim"] + datetime.timedelta(days=1)).isoformat(),
+                    "color": "#2B6CB0" if v["Destino"] == local_sel else "#718096",
+                    "allDay": True,
+                })
+        
+        # Renderiza feriados
+        for f_date in datas_feriados_set:
+            if f_date.month == mes_num and f_date.year == ano_sel:
+                events.append({
+                    "title": "🔴 Feriado / Sem Atendimento",
+                    "start": f_date.isoformat(),
+                    "color": "#E53E3E",
+                    "allDay": True,
+                })
+
+        calendar_options = {
+            "editable": True,
+            "selectable": True,
+            "headerToolbar": {
+                "left": "prev,next today",
+                "center": "title",
+                "right": "dayGridMonth,timeGridWeek"
+            },
+            "initialDate": f"{ano_sel}-{mes_num:02d}-01",
+            "locale": "pt-br",
+        }
+        
+        cal_data = st_calendar(events=events, options=calendar_options, key=f"cal_visual_{chave_guardar}")
+        
+        # Sincronização básica se o usuário mover um evento no calendário
+        if cal_data.get("eventChange"):
+            event_changed = cal_data["eventChange"]["event"]
+            title = event_changed.get("title", "")
+            if title.startswith("🚍 Viagem:"):
+                dest_match = re.search(r"Viagem:\s*([^(]+)", title)
+                if dest_match:
+                    dest_nome = dest_match.group(1).strip()
+                    try:
+                        n_start = datetime.date.fromisoformat(event_changed["start"].split("T")[0])
+                        n_end = datetime.date.fromisoformat(event_changed["end"].split("T")[0]) - datetime.timedelta(days=1)
+                        if n_end < n_start:
+                            n_end = n_start
+                        
+                        for v in st.session_state["viagens_registradas"]:
+                            if v["Banca"] == banca_sel and v["Destino"] == dest_nome:
+                                v["Data Inicio"] = n_start
+                                v["Data Fim"] = n_end
+                                st.toast(f"Datas da viagem para {dest_nome} atualizadas via calendário!")
+                                st.rerun()
+                                break
+                    except Exception:
+                        pass
+    else:
+        st.info("💡 Para ativar a interface gráfica e arrastar viagens diretamente na tela, adicione `streamlit-calendar` ao seu `requirements.txt`.")
 
     st.markdown("### 📝 Lançamento e Edição de Vagas por Horário")
     if tem_viagem_para_local:
