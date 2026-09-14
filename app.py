@@ -1192,70 +1192,85 @@ with v_col2:
     if not st.session_state["viagens_registradas"]:
         st.warning("Nenhuma viagem cadastrada até o momento.")
     else:
-        from datetime import datetime, date
+        # Importação segura para evitar o TypeError na linha 1368
+        import datetime as dt
 
-        # 1. Garante que as datas fiquem em formato date sem quebrar o restante do app
+        # 1. Padronização rigorosa dos tipos de data
         for v in st.session_state["viagens_registradas"]:
             if isinstance(v.get("Data Inicio"), str):
-                v["Data Inicio"] = datetime.strptime(v["Data Inicio"][:10], "%Y-%m-%d").date()
+                v["Data Inicio"] = dt.datetime.strptime(v["Data Inicio"][:10], "%Y-%m-%d").date()
             if isinstance(v.get("Data Fim"), str):
-                v["Data Fim"] = datetime.strptime(v["Data Fim"][:10], "%Y-%m-%d").date()
+                v["Data Fim"] = dt.datetime.strptime(v["Data Fim"][:10], "%Y-%m-%d").date()
 
-        # 2. Agrupa por Banca Principal
-        bancas_unicas = sorted(list({v.get("Banca", "Banca São Luís") for v in st.session_state["viagens_registradas"]}))
+        # 2. Agrupamento por Banca Principal (ex: Banca São Luís, Banca Imperatriz)
+        bancas_principais = sorted(list({v.get("Banca", "Banca São Luís") for v in st.session_state["viagens_registradas"]}))
 
-        for banca in bancas_unicas:
-            # Filtra e ordena as viagens por Data de Início
-            viagens_banca = [v for v in st.session_state["viagens_registradas"] if v.get("Banca") == banca]
-            viagens_banca.sort(key=lambda x: x["Data Inicio"])
-
-            # Cabeçalho AZUL estilo cronograma institucional
+        for b_principal in bancas_principais:
             mes_txt = st.session_state.get('mes_selecionado', 'NOVEMBRO').upper()
+            
+            # Cabeçalho AZUL
             st.markdown(
                 f"""
-                <div style="background-color: #2B579A; color: #FFFFFF; padding: 8px; font-weight: bold; text-align: center; border-radius: 4px; font-size: 14px; text-transform: uppercase; margin-top: 10px; margin-bottom: 10px;">
-                    MÊS DE {mes_txt} — {banca.upper()}
+                <div style="background-color: #2B579A; color: #FFFFFF; padding: 8px; font-weight: bold; text-align: center; border-radius: 4px; font-size: 14px; text-transform: uppercase; margin-top: 15px; margin-bottom: 10px;">
+                    MÊS DE {mes_txt} — {b_principal.upper()}
                 </div>
                 """,
                 unsafe_allow_html=True
             )
 
-            # Lista e formulários dinâmicos de edição por viagem
-            for v in viagens_banca:
-                # Localiza a posição real na lista global
-                idx_global = st.session_state["viagens_registradas"].index(v)
+            viagens_da_banca = [v for v in st.session_state["viagens_registradas"] if v.get("Banca") == b_principal]
+
+            # 3. Agrupamento por Número da Banca Itinerante (ex: Banca 01, Banca 04)
+            numeros_itinerantes = sorted(list({int(v.get("Numero Banca Itinerante", 1)) for v in viagens_da_banca}))
+
+            for num_it in numeros_itinerantes:
+                # Agrupa todos os trechos pertencentes a este mesmo número de banca itinerante
+                grupo_trechos = [v for v in viagens_da_banca if int(v.get("Numero Banca Itinerante", 1)) == num_it]
+                grupo_trechos.sort(key=lambda x: x["Data Inicio"])
+
+                # Une os nomes dos municípios (ex: "Tutóia e Barreirinhas")
+                destinos_unicos = []
+                for t in grupo_trechos:
+                    m = t.get("Destino", "")
+                    if m and m not in destinos_unicos:
+                        destinos_unicos.append(m)
                 
-                num_banca_it = int(v.get("Numero Banca Itinerante", 1))
-                destino_muni = v.get("Destino", "Município")
+                nome_destinos = " e ".join(destinos_unicos) if destinos_unicos else "Destino não informado"
                 
-                with st.container():
-                    st.markdown(f"**📍 {destino_muni}** *(Vinculado à Banca {num_banca_it:02d})*")
+                # Pega dados de referência do primeiro trecho do grupo
+                ref = grupo_trechos[0]
+
+                st.markdown(f"**📍 {nome_destinos}** *(Banca Itinerante {num_it:02d})*")
+                
+                col_dt1, col_dt2, col_bnc, col_ex = st.columns([2, 2, 1.5, 1.5])
+                
+                nova_dt_in = col_dt1.date_input("Início", value=ref["Data Inicio"], format="DD/MM/YYYY", key=f"grp_in_{b_principal}_{num_it}")
+                nova_dt_fim = col_dt2.date_input("Término", value=ref["Data Fim"], format="DD/MM/YYYY", key=f"grp_fim_{b_principal}_{num_it}")
+                novo_num_banca = col_bnc.number_input("Nº Banca", value=num_it, min_value=1, key=f"grp_num_{b_principal}_{num_it}")
+                novos_ex = col_ex.number_input("Examinadores", value=int(ref.get("Examinadores", 1)), min_value=1, key=f"grp_ex_{b_principal}_{num_it}")
+
+                # Aplica as alterações a todos os trechos da mesma banca agregada
+                if (nova_dt_in != ref["Data Inicio"] or nova_dt_fim != ref["Data Fim"] or 
+                    novo_num_banca != num_it or novos_ex != ref.get("Examinadores")):
                     
-                    col_dt1, col_dt2, col_bnc, col_ex = st.columns([2, 2, 1.5, 1.5])
-                    
-                    # Entradas de data no formato dd/mm/aaaa
-                    nova_dt_in = col_dt1.date_input("Início", value=v["Data Inicio"], format="DD/MM/YYYY", key=f"dt_in_{idx_global}")
-                    nova_dt_fim = col_dt2.date_input("Término", value=v["Data Fim"], format="DD/MM/YYYY", key=f"dt_fim_{idx_global}")
-                    novo_num_banca = col_bnc.number_input("Nº Banca", value=num_banca_it, min_value=1, key=f"num_{idx_global}")
-                    novos_ex = col_ex.number_input("Examinadores", value=int(v.get("Examinadores", 1)), min_value=1, key=f"ex_{idx_global}")
+                    for t in grupo_trechos:
+                        t["Data Inicio"] = nova_dt_in
+                        t["Data Fim"] = nova_dt_fim
+                        t["Numero Banca Itinerante"] = novo_num_banca
+                        t["Examinadores"] = novos_ex
+                        t["Período"] = f"{nova_dt_in.strftime('%d/%m/%Y')} até {nova_dt_fim.strftime('%d/%m/%Y')}"
+                    st.rerun()
 
-                    # Atualização em tempo real das alterações feitas
-                    if (nova_dt_in != v["Data Inicio"] or nova_dt_fim != v["Data Fim"] or 
-                        novo_num_banca != v.get("Numero Banca Itinerante") or novos_ex != v.get("Examinadores")):
-                        
-                        v["Data Inicio"] = nova_dt_in
-                        v["Data Fim"] = nova_dt_fim
-                        v["Numero Banca Itinerante"] = novo_num_banca
-                        v["Examinadores"] = novos_ex
-                        v["Período"] = f"{nova_dt_in.strftime('%d/%m/%Y')} até {nova_dt_fim.strftime('%d/%m/%Y')}"
-                        st.rerun()
+                # Botão para remover todo o grupo dessa banca itinerante
+                col_del, _ = st.columns([3, 7])
+                if col_del.button(f"🗑️ Remover Banca {num_it:02d}", key=f"del_grp_{b_principal}_{num_it}"):
+                    st.session_state["viagens_registradas"] = [
+                        v for v in st.session_state["viagens_registradas"] 
+                        if not (v.get("Banca") == b_principal and int(v.get("Numero Banca Itinerante", 1)) == num_it)
+                    ]
+                    st.rerun()
 
-                    col_del, _ = st.columns([2, 8])
-                    if col_del.button("🗑️ Remover", key=f"del_{idx_global}"):
-                        st.session_state["viagens_registradas"].pop(idx_global)
-                        st.rerun()
-
-                    st.markdown("---")
+                st.markdown("---")
 
 # --- ABA: MONTAR CALENDÁRIO ---
 with aba_cal:
