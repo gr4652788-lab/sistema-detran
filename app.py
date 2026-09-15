@@ -1,75 +1,81 @@
+"""DETRAN/MA — Sistema de Gestão de Exames Práticos.
+
+Arquivo único, pronto para substituir o app.py do repositório.
+
+Execução:
+    pip install -r requirements.txt
+    streamlit run app.py
+
+Variáveis de ambiente opcionais:
+    DETRAN_DB         caminho do banco SQLite (padrão: dados/detran.db)
+    DETRAN_SNAPSHOTS  pasta dos snapshots JSON (padrão: dados/snapshots)
+    DETRAN_LOG_LEVEL  nível de log (padrão: INFO)
+
+Organização do arquivo:
+    1. Configuração e constantes
+    2. Regras de negócio (funções puras, sem Streamlit)
+    3. Persistência (SQLite, backup, snapshots)
+    4. Exportadores (PDF e Excel)
+    5. Componentes de interface
+    6. Abas
+    7. Aplicação
+"""
+
+from __future__ import annotations
+
+import base64
 import calendar
 import datetime
+import hashlib
+import html
+import inspect
 import io
 import json
+import logging
 import os
 import re
+import sqlite3
+import threading
+import unicodedata
+from functools import lru_cache
+from pathlib import Path
+from typing import Any, Iterable, Sequence
+
+import holidays
 import openpyxl
-from openpyxl.styles import Alignment, Border, Font, Side
 import pandas as pd
 import streamlit as st
-import holidays
+import streamlit.components.v1 as components
+from openpyxl.styles import Alignment, Border, Font, Side
 from reportlab.lib import colors
-from reportlab.lib.pagesizes import landscape, letter
+from reportlab.lib.pagesizes import A4, landscape
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
-from reportlab.platypus import Paragraph, SimpleDocTemplate, Table, TableStyle
+from reportlab.lib.units import mm
+from reportlab.platypus import (
+    KeepTogether,
+    PageBreak,
+    Paragraph,
+    SimpleDocTemplate,
+    Spacer,
+    Table,
+    TableStyle,
+)
 
-# Tenta importar streamlit_calendar com graceful fallback
-try:
-    from streamlit_calendar import calendar as st_calendar
-    HAS_CALENDAR_COMPONENT = True
+try:  # Componente opcional de calendário interativo.
+    from streamlit_calendar import calendar as componente_calendario
+
+    TEM_COMPONENTE_CALENDARIO = True
 except ImportError:
-    HAS_CALENDAR_COMPONENT = False
+    TEM_COMPONENTE_CALENDARIO = False
 
-# Configuração da página
-st.set_page_config(
-    page_title="DETRAN/MA - Gestão de Exames Práticos",
-    page_icon="🚗",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
 
-st.markdown('<meta name="google" content="notranslate">', unsafe_allow_html=True)
-# Estilização CSS Customizada
-st.markdown(
-    """
-    <style>
-    .main { background-color: #f8f9fa; }
-    .header-container {
-        background: linear-gradient(90deg, #1A365D 0%, #2B6CB0 100%);
-        padding: 20px;
-        border-radius: 10px;
-        color: white;
-        margin-bottom: 25px;
-        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-    }
-    .header-container h1 { color: white !important; margin: 0; font-size: 26px; font-weight: 700; }
-    .header-container p { color: #E2E8F0; margin: 5px 0 0 0; font-size: 14px; }
-    div[data-testid="stMetric"] {
-        background-color: #ffffff;
-        border-left: 5px solid #2B6CB0;
-        padding: 15px;
-        border-radius: 8px;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.05);
-    }
-    .stTabs [data-baseweb="tab-list"] { gap: 8px; }
-    .stTabs [data-baseweb="tab"] {
-        height: 45px;
-        white-space: pre-wrap;
-        background-color: #EDF2F7;
-        border-radius: 6px 6px 0 0;
-        color: #2D3748;
-        font-weight: 600;
-        padding: 10px 16px;
-    }
-    .stTabs [aria-selected="true"] { background-color: #1A365D !important; color: white !important; }
-    .stButton>button { border-radius: 6px; font-weight: 600; }
-    </style>
-""",
-    unsafe_allow_html=True,
-)
+# ===========================================================================
+# 1. CONFIGURAÇÃO E CONSTANTES
+# ===========================================================================
 
-# Lista completa de meses
+SEPARADOR_CHAVE = "||"
+SCHEMA_VERSION = 5
+
 MESES_LISTA = [
     "Janeiro",
     "Fevereiro",
@@ -84,7 +90,7 @@ MESES_LISTA = [
     "Novembro",
     "Dezembro",
 ]
-ANOS_LISTA = [2026, 2027, 2028, 2029, 2030]
+
 DIAS_SEMANA_OPCOES = [
     "Segunda",
     "Terça",
@@ -94,86 +100,115 @@ DIAS_SEMANA_OPCOES = [
     "Sábado",
     "Domingo",
 ]
+DIAS_UTEIS_PADRAO = DIAS_SEMANA_OPCOES[:5]
+ANOS_A_FRENTE = 5
 
-# --- ESTADO DA SESSÃO ---
-if "bancas_config" not in st.session_state:
-    st.session_state["bancas_config"] = {
-        "Banca São Luís": [
-            "São Luís Pátio",
-            "São Luís Cohatrac",
-            "São Luís Castelinho",
-            "São Luís Cidade Operária",
-            "Paço do Lumiar",
-            "Raposa",
-            "São José de Ribamar",
-            "Pinheiro",
-            "São Bento",
-            "Carutapera",
-            "Turilândia",
-            "Tutóia",
-            "Barreirinhas",
-            "Chapadinha",
-            "Axixá",
-            "Rosário",
-            "Santa Rita",
-            "Coroatá",
-            "Itapecuru-mirim",
-            "Codó",
-        ],
-        "Banca Imperatriz": [
-            "Imperatriz",
-            "Açailândia",
-            "Estreito",
-            "Grajaú",
-            "Amarante do Maranhão",
-        ],
-        "Banca Timon": ["Timon - Pátio", "Matões", "Parnarama"],
-        "Banca Caxias": [
-            "Caxias - Pátio",
-            "Codó - Regional",
-            "São João do Sóter",
-            "Aldeias Altas",
-        ],
-        "Banca Bacabal": [
-            "Bacabal - Pátio",
-            "Pedreiras",
-            "Lago da Pedra",
-            "Olho d'Água das Cunhãs",
-        ],
-        "Banca Santa Inês": [
-            "Santa Inês - Pátio",
-            "Viana",
-            "Zé Doca",
-            "Monção",
-            "Pindaré-Mirim",
-        ],
-    }
 
-if "lista_horarios" not in st.session_state:
-    st.session_state["lista_horarios"] = [
-        "08:30",
-        "09:30",
-        "10:30",
-        "11:30",
-        "13:30",
-        "14:30",
-        "15:30",
-        "16:30",
-    ]
+def anos_disponiveis(anos_a_frente: int = ANOS_A_FRENTE) -> list[int]:
+    """Anos selecionáveis, sempre a partir do ano corrente."""
+    ano_atual = datetime.date.today().year
+    return list(range(ano_atual, ano_atual + anos_a_frente))
 
-if "historico_localidades" not in st.session_state:
-    st.session_state["historico_localidades"] = {}
 
-if "feriados_locais_dict" not in st.session_state:
-    st.session_state["feriados_locais_dict"] = {}
+def indice_mes_atual() -> int:
+    return datetime.date.today().month - 1
 
-if "viagens_registradas" not in st.session_state:
-    st.session_state["viagens_registradas"] = []
 
-if "dias_permitidos_dict" not in st.session_state:
-    st.session_state["dias_permitidos_dict"] = {}
+def numero_do_mes(nome_mes: str) -> int:
+    return MESES_LISTA.index(nome_mes) + 1
 
-CAPACIDADE_BANCAS_PADRAO = {
+
+BANCAS_PADRAO: dict[str, list[str]] = {
+    "Banca São Luís": [
+        "São Luís Pátio",
+        "São Luís Castelinho",
+        "São Luís Cohatrac",
+        "São Luís Cidade Operária",
+        "Paço do Lumiar",
+        "São José de Ribamar",
+        "Raposa",
+        "Pinheiro",
+        "São Bento",
+        "Carutapera",
+        "Turilândia",
+        "Tutóia",
+        "Barreirinhas",
+        "Chapadinha",
+        "Axixá",
+        "Rosário",
+        "Santa Rita",
+        "Coroatá",
+        "Itapecuru-mirim",
+        "Codó",
+    ],
+    "Banca Imperatriz": [
+        "Imperatriz",
+        "Açailândia",
+        "Estreito",
+        "Grajaú",
+        "Amarante do Maranhão",
+    ],
+    "Banca Timon": ["Timon - Pátio", "Matões", "Parnarama"],
+    "Banca Caxias": [
+        "Caxias - Pátio",
+        "Codó - Regional",
+        "São João do Sóter",
+        "Aldeias Altas",
+    ],
+    "Banca Bacabal": [
+        "Bacabal - Pátio",
+        "Pedreiras",
+        "Lago da Pedra",
+        "Olho d'Água das Cunhãs",
+    ],
+    "Banca Santa Inês": [
+        "Santa Inês - Pátio",
+        "Viana",
+        "Zé Doca",
+        "Monção",
+        "Pindaré-Mirim",
+    ],
+}
+
+# Ordem de apresentação nos relatórios em PDF: primeiro as unidades da sede,
+# depois a região metropolitana e, por último, os demais municípios por ordem
+# da data do primeiro exame lançado.
+ORDEM_PRIORITARIA_PDF: dict[str, list[str]] = {
+    "Banca São Luís": [
+        "São Luís Pátio",
+        "São Luís Castelinho",
+        "São Luís Cohatrac",
+        "São Luís Cidade Operária",
+        "Paço do Lumiar",
+        "São José de Ribamar",
+        "Raposa",
+    ],
+}
+
+GRUPOS_PDF: dict[str, list[str]] = {
+    "São Luís Pátio": "SEDE — SÃO LUÍS",
+    "São Luís Castelinho": "SEDE — SÃO LUÍS",
+    "São Luís Cohatrac": "SEDE — SÃO LUÍS",
+    "São Luís Cidade Operária": "SEDE — SÃO LUÍS",
+    "Paço do Lumiar": "REGIÃO METROPOLITANA",
+    "São José de Ribamar": "REGIÃO METROPOLITANA",
+    "Raposa": "REGIÃO METROPOLITANA",
+}
+GRUPO_INTERIOR = "DEMAIS MUNICÍPIOS"
+GRUPO_SEDE_GENERICO = "SEDE DA BANCA"
+
+HORARIOS_PADRAO = [
+    "08:30",
+    "09:30",
+    "10:30",
+    "11:30",
+    "13:30",
+    "14:30",
+    "15:30",
+    "16:30",
+]
+
+CAPACIDADE_BANCAS_PADRAO: dict[str, int] = {
     "Banca São Luís": 34,
     "Banca Imperatriz": 14,
     "Banca Bacabal": 5,
@@ -181,7 +216,7 @@ CAPACIDADE_BANCAS_PADRAO = {
     "Banca Timon": 4,
     "Banca Santa Inês": 3,
 }
-LIMITE_FORA_SEDE_PADRAO = {
+LIMITE_FORA_SEDE_PADRAO: dict[str, int] = {
     "Banca São Luís": 16,
     "Banca Imperatriz": 10,
     "Banca Bacabal": 5,
@@ -189,1800 +224,4400 @@ LIMITE_FORA_SEDE_PADRAO = {
     "Banca Timon": 4,
     "Banca Santa Inês": 3,
 }
-if "capacidade_bancas" not in st.session_state:
-    st.session_state["capacidade_bancas"] = dict(CAPACIDADE_BANCAS_PADRAO)
-if "limite_fora_sede_bancas" not in st.session_state:
-    st.session_state["limite_fora_sede_bancas"] = dict(LIMITE_FORA_SEDE_PADRAO)
-if "disponibilidade_semanal" not in st.session_state:
-    st.session_state["disponibilidade_semanal"] = {}
-if "controle_capacidade_ativo" not in st.session_state:
-    st.session_state["controle_capacidade_ativo"] = False
 
-# --- BACKUP AUTOMÁTICO EM DISCO ---
-ARQUIVO_AUTOSAVE = "detran_autosave_backup.json"
+BANCAS_APOIO_CONJUNTO = ["Banca Caxias", "Banca Timon"]
+BANCAS_COM_QUADRO_MATRIZ = ["Banca São Luís", "Banca Imperatriz"]
+BANCAS_COM_DISPONIBILIDADE_SEMANAL = ["Banca São Luís", "Banca Imperatriz"]
+
+COLS_CATEGORIA = ["Cat A", "Cat B", "Cat C", "Cat D", "Cat E"]
+COLS_PCD = ["PCD A", "PCD B", "PCD C", "PCD D", "PCD E"]
+COLS_VAGAS = COLS_CATEGORIA + COLS_PCD
+
+STATUS_DISPONIVEL = "Disponível"
+STATUS_INDISPONIVEL = "Indisponível"
+STATUS_FERIADO = "Feriado / Sem Atendimento"
+OPCOES_STATUS = [STATUS_DISPONIVEL, STATUS_INDISPONIVEL, STATUS_FERIADO]
+STATUS_BLOQUEADOS = {STATUS_INDISPONIVEL, STATUS_FERIADO}
+
+TURNO_INTEGRAL = "Dia inteiro"
+TURNO_MANHA = "Manhã"
+TURNO_TARDE = "Tarde"
+TURNO_SEM_ATENDIMENTO = "Não atende"
+TURNOS = [TURNO_INTEGRAL, TURNO_MANHA, TURNO_TARDE]
+TURNOS_POR_DIA = [TURNO_INTEGRAL, TURNO_MANHA, TURNO_TARDE, TURNO_SEM_ATENDIMENTO]
+
+UF_FERIADOS = "MA"
+
+# Logística padrão atrelada a cada equipe itinerante. Aparece apenas no PDF da
+# escala de viagens, conforme solicitado — não há campo para isso na interface.
+PREPOSTOS_POR_EQUIPE = 1
+VEICULOS_POR_EQUIPE = 1
+
+COR_PRIMARIA = "#1A365D"
+COR_SECUNDARIA = "#2B6CB0"
+COR_CLARA = "#EDF2F7"
+COR_NEUTRA = "#718096"
+COR_ALERTA = "#E53E3E"
+COR_VIAGEM = "#2F855A"
+
+CSS_CUSTOMIZADO = """
+<style>
+.main { background-color: #f8f9fa; }
+.header-container {
+    background: linear-gradient(90deg, #1A365D 0%, #2B6CB0 100%);
+    padding: 20px;
+    border-radius: 10px;
+    color: white;
+    margin-bottom: 25px;
+    box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+}
+.header-container h1 { color: white !important; margin: 0; font-size: 26px; font-weight: 700; }
+.header-container p { color: #E2E8F0; margin: 5px 0 0 0; font-size: 14px; }
+.faixa-banca {
+    background-color: #2B579A;
+    color: #FFFFFF;
+    padding: 8px;
+    font-weight: bold;
+    text-align: center;
+    border-radius: 4px;
+    font-size: 14px;
+    text-transform: uppercase;
+    margin-top: 15px;
+    margin-bottom: 10px;
+}
+div[data-testid="stMetric"] {
+    background-color: #ffffff;
+    border-left: 5px solid #2B6CB0;
+    padding: 15px;
+    border-radius: 8px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+}
+.stTabs [data-baseweb="tab-list"] { gap: 8px; }
+.stTabs [data-baseweb="tab"] {
+    height: 45px;
+    white-space: pre-wrap;
+    background-color: #EDF2F7;
+    border-radius: 6px 6px 0 0;
+    color: #2D3748;
+    font-weight: 600;
+    padding: 10px 16px;
+}
+.stTabs [aria-selected="true"] { background-color: #1A365D !important; color: white !important; }
+.stButton>button { border-radius: 6px; font-weight: 600; }
+</style>
+"""
+
+CABECALHO_HTML = """
+<div class="header-container">
+    <h1>🚗 DETRAN/MA — Sistema de Gestão de Exames Práticos</h1>
+    <p>Planejamento de Vagas, Controle de Efetivo de Examinadores e Distribuição por Localidades</p>
+</div>
+"""
+
+LOG = logging.getLogger("detran")
+Viagem = dict[str, Any]
 
 
-def _numero_seguro_para_json(valor):
-    """Converte tipos numéricos do NumPy/Pandas para tipos nativos do Python."""
-    if hasattr(valor, "item"):
-        return valor.item()
-    return str(valor)
+def _kwargs_largura_total() -> dict[str, Any]:
+    """Compatibilidade entre versões do Streamlit.
 
-
-def montar_estado_para_backup():
-    """Reúne tudo que precisa ser preservado num dicionário simples para JSON."""
-    viagens_serializadas = []
-    for v in st.session_state["viagens_registradas"]:
-        v_copia = dict(v)
-        v_copia["Data Inicio"] = v["Data Inicio"].isoformat()
-        v_copia["Data Fim"] = v["Data Fim"].isoformat()
-        viagens_serializadas.append(v_copia)
-
-    historico_serializado = {
-        chave: df.to_dict(orient="records")
-        for chave, df in st.session_state["historico_localidades"].items()
-    }
-
-    return {
-        "bancas_config": st.session_state["bancas_config"],
-        "lista_horarios": st.session_state["lista_horarios"],
-        "horarios_inativos": st.session_state.get("horarios_inativos", []),
-        "historico_localidades": historico_serializado,
-        "feriados_locais_dict": st.session_state["feriados_locais_dict"],
-        "viagens_registradas": viagens_serializadas,
-        "dias_permitidos_dict": st.session_state["dias_permitidos_dict"],
-        "capacidade_bancas": st.session_state["capacidade_bancas"],
-        "limite_fora_sede_bancas": st.session_state["limite_fora_sede_bancas"],
-        "disponibilidade_semanal": st.session_state["disponibilidade_semanal"],
-        "controle_capacidade_ativo": st.session_state.get("controle_capacidade_ativo", False),
-        "schema_version": 3,
-    }
-
-
-def aplicar_estado_do_backup(dados):
-    """Repõe o conteúdo de um backup no session_state atual."""
-    st.session_state["bancas_config"] = dados.get(
-        "bancas_config", st.session_state["bancas_config"]
-    )
-    st.session_state["lista_horarios"] = dados.get(
-        "lista_horarios", st.session_state["lista_horarios"]
-    )
-    st.session_state["horarios_inativos"] = dados.get("horarios_inativos", [])
-    st.session_state["historico_localidades"] = {
-        chave: pd.DataFrame(registros)
-        for chave, registros in dados.get("historico_localidades", {}).items()
-    }
-    st.session_state["feriados_locais_dict"] = dados.get("feriados_locais_dict", {})
-
-    viagens_restauradas = []
-    for v in dados.get("viagens_registradas", []):
-        v_copia = dict(v)
-        v_copia["Data Inicio"] = datetime.date.fromisoformat(v["Data Inicio"])
-        v_copia["Data Fim"] = datetime.date.fromisoformat(v["Data Fim"])
-        viagens_restauradas.append(v_copia)
-    st.session_state["viagens_registradas"] = viagens_restauradas
-
-    st.session_state["dias_permitidos_dict"] = dados.get("dias_permitidos_dict", {})
-    st.session_state["capacidade_bancas"] = {**CAPACIDADE_BANCAS_PADRAO, **dados.get("capacidade_bancas", {})}
-    st.session_state["limite_fora_sede_bancas"] = {**LIMITE_FORA_SEDE_PADRAO, **dados.get("limite_fora_sede_bancas", {})}
-    st.session_state["disponibilidade_semanal"] = dados.get("disponibilidade_semanal", {})
-    st.session_state["controle_capacidade_ativo"] = bool(dados.get("controle_capacidade_ativo", False))
-
-
-def salvar_autosave_em_disco():
-    """Salva o estado atual em um arquivo JSON local."""
+    ``use_container_width`` foi substituído por ``width="stretch"``. Detectamos
+    a assinatura em tempo de execução para o arquivo funcionar tanto em
+    instalações antigas quanto nas novas, sem emitir avisos de depreciação.
+    """
     try:
-        tmp = ARQUIVO_AUTOSAVE + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(montar_estado_para_backup(), f, ensure_ascii=False, default=_numero_seguro_para_json)
-        os.replace(tmp, ARQUIVO_AUTOSAVE)
-        st.session_state["ultimo_autosave"] = datetime.datetime.now().strftime("%d/%m/%Y %H:%M:%S")
-        st.session_state["erro_autosave"] = None
-    except Exception as e:
-        st.session_state["erro_autosave"] = str(e)
+        parametros = inspect.signature(st.dataframe).parameters
+    except (TypeError, ValueError):
+        return {"use_container_width": True}
+    if "width" in parametros:
+        return {"width": "stretch"}
+    return {"use_container_width": True}
 
 
-def carregar_autosave_do_disco():
-    """Carrega o arquivo de backup automático se existir."""
-    if not os.path.exists(ARQUIVO_AUTOSAVE):
-        return False
-    try:
-        with open(ARQUIVO_AUTOSAVE, "r", encoding="utf-8") as f:
-            dados = json.load(f)
-        aplicar_estado_do_backup(dados)
-        return True
-    except Exception:
-        return False
+LARGURA_TOTAL = _kwargs_largura_total()
 
 
-if "autosave_carregado_nesta_sessao" not in st.session_state:
-    carregar_autosave_do_disco()
-    st.session_state["autosave_carregado_nesta_sessao"] = True
+# ===========================================================================
+# 2. REGRAS DE NEGÓCIO
+# ===========================================================================
+# Nenhuma função desta seção acessa session_state ou banco: todas recebem os
+# dados por argumento, o que as torna testáveis isoladamente.
 
-# Garante numeração para viagens que não possuem o atributo de banca itinerante
-contador_numero_por_banca = {}
-for v in st.session_state["viagens_registradas"]:
-    if "Numero Banca Itinerante" not in v or not v["Numero Banca Itinerante"]:
-        contador_numero_por_banca[v["Banca"]] = (
-            contador_numero_por_banca.get(v["Banca"], 0) + 1
-        )
-        v["Numero Banca Itinerante"] = contador_numero_por_banca[v["Banca"]]
-    else:
-        contador_numero_por_banca[v["Banca"]] = max(
-            contador_numero_por_banca.get(v["Banca"], 0),
-            v["Numero Banca Itinerante"],
-        )
-
-# Migração de dados de Imperatriz
-NOME_ANTIGO_IMPERATRIZ = "Imperatriz - Pátio"
-NOME_NOVO_IMPERATRIZ = "Imperatriz"
-if NOME_ANTIGO_IMPERATRIZ in st.session_state["bancas_config"].get(
-    "Banca Imperatriz", []
-):
-    st.session_state["bancas_config"]["Banca Imperatriz"] = [
-        NOME_NOVO_IMPERATRIZ if loc == NOME_ANTIGO_IMPERATRIZ else loc
-        for loc in st.session_state["bancas_config"]["Banca Imperatriz"]
-    ]
-    st.session_state["historico_localidades"] = {
-        chave.replace(NOME_ANTIGO_IMPERATRIZ, NOME_NOVO_IMPERATRIZ): df
-        for chave, df in st.session_state["historico_localidades"].items()
-    }
-    for v in st.session_state["viagens_registradas"]:
-        if v["Destino"] == NOME_ANTIGO_IMPERATRIZ:
-            v["Destino"] = NOME_NOVO_IMPERATRIZ
-    for chave_dias in list(st.session_state["dias_permitidos_dict"].keys()):
-        if chave_dias.endswith(f"_{NOME_ANTIGO_IMPERATRIZ}"):
-            nova_chave = chave_dias.replace(
-                NOME_ANTIGO_IMPERATRIZ, NOME_NOVO_IMPERATRIZ
-            )
-            st.session_state["dias_permitidos_dict"][
-                nova_chave
-            ] = st.session_state["dias_permitidos_dict"].pop(chave_dias)
-    for chave_feriado in list(st.session_state["feriados_locais_dict"].keys()):
-        if chave_feriado.endswith(f"_{NOME_ANTIGO_IMPERATRIZ}"):
-            nova_chave = chave_feriado.replace(
-                NOME_ANTIGO_IMPERATRIZ, NOME_NOVO_IMPERATRIZ
-            )
-            st.session_state["feriados_locais_dict"][
-                nova_chave
-            ] = st.session_state["feriados_locais_dict"].pop(chave_feriado)
+_PADRAO_ISO = re.compile(r"^\s*(\d{4})-(\d{1,2})-(\d{1,2})")
+_PADRAO_BR = re.compile(r"^\s*(\d{1,2})/(\d{1,2})(?:/(\d{2,4}))?")
 
 
-def obter_sede(banca):
-    """Retorna a sede da banca (primeiro item cadastrado)."""
-    lista = st.session_state["bancas_config"].get(banca, [])
-    return lista[0] if lista else None
-
-
-def periodo_do_horario(horario):
-    """Classifica horário em Manhã ou Tarde."""
-    try:
-        h, m = map(int, str(horario).split(":"))
-        return "Manhã" if (h, m) < (12, 0) else "Tarde"
-    except Exception:
-        return "Manhã"
-
-
-def viagem_cobre_periodo(v, data, periodo):
-    if not (v["Data Inicio"] <= data <= v["Data Fim"]):
-        return False
-    turno = v.get("Turno", "Dia inteiro")
-    return turno == "Dia inteiro" or turno == periodo
-
-
-def banca_vinculada(v, banca):
-    return v.get("Banca") == banca or (v.get("Apoio Conjunto") and banca in ["Banca Caxias", "Banca Timon"])
-
-
-def examinadores_da_banca_na_viagem(v, banca):
-    if v.get("Apoio Conjunto"):
-        if banca == "Banca Caxias":
-            return int(v.get("Examinadores Caxias", v.get("Examinadores", 0)))
-        if banca == "Banca Timon":
-            return int(v.get("Examinadores Timon", v.get("Examinadores", 0)))
-    return int(v.get("Examinadores", 0)) if v.get("Banca") == banca else 0
-
-
-def viagens_ativas_no_periodo(banca, data, periodo, ignorar_idx=None):
-    resultado = []
-    for idx, v in enumerate(st.session_state["viagens_registradas"]):
-        if ignorar_idx is not None and idx == ignorar_idx:
+def para_data(valor: Any) -> datetime.date | None:
+    """Normaliza qualquer representação de data para ``datetime.date``."""
+    if valor is None or valor == "":
+        return None
+    if isinstance(valor, datetime.datetime):
+        return valor.date()
+    if isinstance(valor, datetime.date):
+        return valor
+    texto = str(valor).strip()
+    for formato in ("%Y-%m-%d", "%d/%m/%Y", "%d/%m/%y"):
+        try:
+            return datetime.datetime.strptime(texto[:10], formato).date()
+        except ValueError:
             continue
-        if banca_vinculada(v, banca) and viagem_cobre_periodo(v, data, periodo):
-            resultado.append(v)
-    return resultado
+    LOG.warning("Não foi possível interpretar a data %r", valor)
+    return None
 
 
-def semana_chave(data):
+def formatar_br(data: datetime.date | None) -> str:
+    return data.strftime("%d/%m/%Y") if data else "-"
+
+
+def formatar_curto(data: datetime.date | None) -> str:
+    return data.strftime("%d/%m") if data else "-"
+
+
+def semana_chave(data: datetime.date) -> str:
     segunda = data - datetime.timedelta(days=data.weekday())
     return segunda.isoformat()
 
 
-def disponibilidade_semanal_banca(banca, data):
-    chave = f"{banca}|{semana_chave(data)}"
-    return int(st.session_state["disponibilidade_semanal"].get(chave, st.session_state["capacidade_bancas"].get(banca, 0)))
+def nome_dia_semana(data: datetime.date) -> str:
+    return DIAS_SEMANA_OPCOES[data.weekday()]
 
 
-def conflitos_de_horario_rota(banca, destino, inicio, fim, turno, numero, apoio=False, ignorar_idx=None):
-    conflitos = []
-    for idx, v in enumerate(st.session_state["viagens_registradas"]):
-        if ignorar_idx is not None and idx == ignorar_idx:
-            continue
-        if v.get("Numero Banca Itinerante") != numero:
-            continue
-        if not banca_vinculada(v, banca):
-            continue
-        ini = max(inicio, v["Data Inicio"]); f = min(fim, v["Data Fim"])
-        if ini > f:
-            continue
-        t2 = v.get("Turno", "Dia inteiro")
-        if turno == "Dia inteiro" or t2 == "Dia inteiro" or turno == t2:
-            conflitos.append(v)
-    return conflitos
+def dias_do_intervalo(
+    inicio: datetime.date, fim: datetime.date, apenas_uteis: bool = False
+) -> list[datetime.date]:
+    dias = []
+    cursor = inicio
+    while cursor <= fim:
+        if not apenas_uteis or cursor.weekday() < 5:
+            dias.append(cursor)
+        cursor += datetime.timedelta(days=1)
+    return dias
 
 
-def extrair_data_feriado(linha, ano_ref):
+def _data_ou_none(ano: int, mes: int, dia: int) -> datetime.date | None:
+    try:
+        return datetime.date(ano, mes, dia)
+    except ValueError:
+        return None
+
+
+@lru_cache(maxsize=64)
+def feriados_estaduais(ano: int, uf: str = UF_FERIADOS) -> frozenset[datetime.date]:
+    """Feriados nacionais e estaduais, tolerante à versão da biblioteca."""
+    try:
+        calendario = holidays.Brazil(subdiv=uf, years=ano)
+    except TypeError:
+        try:
+            calendario = holidays.BR(state=uf, years=ano)
+        except Exception:
+            LOG.exception("Falha ao carregar feriados de %s/%s", uf, ano)
+            return frozenset()
+    except Exception:
+        LOG.exception("Falha ao carregar feriados de %s/%s", uf, ano)
+        return frozenset()
+    return frozenset(calendario.keys())
+
+
+def extrair_data_feriado(linha: str, ano_referencia: int) -> datetime.date | None:
+    """Lê ``25/12 - Natal``, ``25/12/2027`` ou ``2026-06-15`` e devolve a data."""
     if not linha or not linha.strip():
         return None
-    parte_data = linha.split("-")[0].split("–")[0].split("(")[0].strip()
-    formatos = ["%d/%m/%Y", "%d/%m", "%Y-%m-%d"]
-    for fmt in formatos:
+    texto = linha.strip()
+
+    iso = _PADRAO_ISO.match(texto)
+    if iso:
+        return _data_ou_none(*(int(g) for g in iso.groups()))
+
+    br = _PADRAO_BR.match(texto)
+    if not br:
+        return None
+    dia, mes, ano = br.groups()
+    if ano is None:
+        ano_int = int(ano_referencia)
+    else:
+        ano_int = int(ano)
+        if ano_int < 100:
+            ano_int += 2000
+    return _data_ou_none(ano_int, int(mes), int(dia))
+
+
+def datas_de_feriado_do_texto(texto: str, ano_referencia: int) -> set[datetime.date]:
+    datas: set[datetime.date] = set()
+    for linha in str(texto or "").splitlines():
+        data = extrair_data_feriado(linha.strip(), ano_referencia)
+        if data:
+            datas.add(data)
+    return datas
+
+
+# --- Chaves compostas -------------------------------------------------------
+def _sanitizar(texto: str) -> str:
+    return str(texto).replace(SEPARADOR_CHAVE, "/")
+
+
+def chave_historico(banca: str, mes: str, ano: int | str, local: str) -> str:
+    return SEPARADOR_CHAVE.join(
+        [_sanitizar(banca), _sanitizar(mes), str(ano), _sanitizar(local)]
+    )
+
+
+def desmontar_chave_historico(chave: str) -> tuple[str, str, str, str] | None:
+    partes = chave.split(SEPARADOR_CHAVE)
+    if len(partes) != 4:
+        return None
+    return partes[0], partes[1], partes[2], partes[3]
+
+
+def chave_local(banca: str, local: str) -> str:
+    return SEPARADOR_CHAVE.join([_sanitizar(banca), _sanitizar(local)])
+
+
+def chave_disponibilidade(banca: str, data: datetime.date) -> str:
+    return SEPARADOR_CHAVE.join([_sanitizar(banca), semana_chave(data)])
+
+
+def normalizar_texto(texto: str) -> str:
+    sem_acento = unicodedata.normalize("NFKD", str(texto))
+    sem_acento = "".join(c for c in sem_acento if not unicodedata.combining(c))
+    return sem_acento.strip().lower()
+
+
+# --- Estrutura organizacional ----------------------------------------------
+def obter_sede(bancas_config: dict[str, list[str]], banca: str) -> str | None:
+    localidades = bancas_config.get(banca) or []
+    return localidades[0] if localidades else None
+
+
+def todas_localidades(bancas_config: dict[str, list[str]]) -> list[str]:
+    encontradas: set[str] = set()
+    for lista in bancas_config.values():
+        encontradas.update(lista)
+    return sorted(encontradas)
+
+
+# --- Viagens ----------------------------------------------------------------
+def bancas_da_viagem(viagem: Viagem) -> list[str]:
+    bancas = []
+    titular = viagem.get("Banca")
+    if titular:
+        bancas.append(titular)
+    for banca in viagem.get("Bancas Apoio") or []:
+        if banca not in bancas:
+            bancas.append(banca)
+    return bancas
+
+
+def banca_vinculada(viagem: Viagem, banca: str) -> bool:
+    return banca in bancas_da_viagem(viagem)
+
+
+def examinadores_da_banca_na_viagem(viagem: Viagem, banca: str) -> int:
+    if not banca_vinculada(viagem, banca):
+        return 0
+    por_banca = viagem.get("Examinadores Por Banca") or {}
+    if banca in por_banca:
         try:
-            dt = datetime.datetime.strptime(parte_data, fmt).date()
-            if fmt == "%d/%m":
-                dt = dt.replace(year=ano_ref)
-            return dt
-        except ValueError:
+            return int(por_banca[banca])
+        except (TypeError, ValueError):
+            return 0
+    if viagem.get("Banca") == banca:
+        try:
+            return int(viagem.get("Examinadores", 0))
+        except (TypeError, ValueError):
+            return 0
+    return 0
+
+
+def total_examinadores(viagem: Viagem) -> int:
+    por_banca = viagem.get("Examinadores Por Banca") or {}
+    if por_banca:
+        return sum(int(v or 0) for v in por_banca.values())
+    try:
+        return int(viagem.get("Examinadores", 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def turno_da_viagem_no_dia(viagem: Viagem, data: datetime.date) -> str:
+    """Turno efetivo da viagem em um dia específico.
+
+    O turno geral da viagem vale para todo o período, mas cada dia pode ter
+    um ajuste próprio. É o que permite uma mesma equipe atender Pinheiro pela
+    manhã e São Bento à tarde no dia 12, sem que o sistema conte duas equipes.
+    """
+    ajustes = viagem.get("Turnos Por Data") or {}
+    especifico = ajustes.get(data.isoformat())
+    if especifico:
+        return especifico
+    return viagem.get("Turno", TURNO_INTEGRAL)
+
+
+def viagem_cobre_periodo(viagem: Viagem, data: datetime.date, periodo: str) -> bool:
+    inicio = para_data(viagem.get("Data Inicio"))
+    fim = para_data(viagem.get("Data Fim"))
+    if not inicio or not fim or not (inicio <= data <= fim):
+        return False
+    turno = turno_da_viagem_no_dia(viagem, data)
+    if turno == TURNO_SEM_ATENDIMENTO:
+        return False
+    return turno == TURNO_INTEGRAL or turno == periodo
+
+
+def viagem_cobre_dia(viagem: Viagem, data: datetime.date) -> bool:
+    return viagem_cobre_periodo(viagem, data, TURNO_MANHA) or viagem_cobre_periodo(
+        viagem, data, TURNO_TARDE
+    )
+
+
+def dias_efetivos_da_viagem(viagem: Viagem) -> list[datetime.date]:
+    """Dias em que a equipe realmente atende, já descontando 'Não atende'."""
+    inicio = para_data(viagem.get("Data Inicio"))
+    fim = para_data(viagem.get("Data Fim"))
+    if not inicio or not fim:
+        return []
+    return [d for d in dias_do_intervalo(inicio, fim) if viagem_cobre_dia(viagem, d)]
+
+
+def descricao_turnos(viagem: Viagem) -> str:
+    """Texto curto com os dias que fogem do turno geral da viagem."""
+    ajustes = viagem.get("Turnos Por Data") or {}
+    if not ajustes:
+        return ""
+    partes = []
+    for iso in sorted(ajustes):
+        data = para_data(iso)
+        turno = ajustes[iso]
+        if not data or turno == viagem.get("Turno", TURNO_INTEGRAL):
             continue
+        partes.append(f"{formatar_curto(data)}: {turno.lower()}")
+    return " · ".join(partes)
+
+
+def periodo_do_horario(horario: str) -> str:
+    try:
+        hora, minuto = (int(p) for p in str(horario).split(":")[:2])
+    except (TypeError, ValueError):
+        LOG.warning("Horário inválido: %r — assumindo Manhã", horario)
+        return TURNO_MANHA
+    return TURNO_MANHA if (hora, minuto) < (12, 0) else TURNO_TARDE
+
+
+def viagens_ativas_no_periodo(
+    viagens: Sequence[Viagem],
+    banca: str,
+    data: datetime.date,
+    periodo: str,
+    ignorar_id: Any = None,
+) -> list[Viagem]:
+    ativas = []
+    for v in viagens:
+        if ignorar_id is not None and v.get("id") == ignorar_id:
+            continue
+        if banca_vinculada(v, banca) and viagem_cobre_periodo(v, data, periodo):
+            ativas.append(v)
+    return ativas
+
+
+def viagem_do_local(
+    viagens: Sequence[Viagem],
+    banca: str,
+    local: str,
+    data: datetime.date,
+    periodo: str,
+) -> Viagem | None:
+    for v in viagens:
+        if (
+            banca_vinculada(v, banca)
+            and v.get("Destino") == local
+            and viagem_cobre_periodo(v, data, periodo)
+        ):
+            return v
     return None
 
 
-def formatar_datas_exames(dias_unicos):
-    """Converte lista de dias do mês no formato de intervalos para publicação oficial."""
-    if not dias_unicos:
-        return "-"
+def viagem_do_local_no_dia(
+    viagens: Sequence[Viagem], banca: str, local: str, data: datetime.date
+) -> Viagem | None:
+    for v in viagens:
+        if (
+            banca_vinculada(v, banca)
+            and v.get("Destino") == local
+            and viagem_cobre_dia(v, data)
+        ):
+            return v
+    return None
 
-    dias_ordenados = sorted(set(dias_unicos))
-    grupos = []
-    grupo_atual = [dias_ordenados[0]]
-    for d in dias_ordenados[1:]:
-        if d == grupo_atual[-1] + 1:
-            grupo_atual.append(d)
+
+def conflitos_de_rota(
+    viagens: Sequence[Viagem],
+    banca: str,
+    numero_equipe: int,
+    inicio: datetime.date,
+    fim: datetime.date,
+    turno: str,
+    turnos_por_data: dict[str, str] | None = None,
+    ignorar_id: Any = None,
+) -> list[Viagem]:
+    """Trechos da mesma equipe que disputam o mesmo turno no mesmo dia.
+
+    A checagem passou a ser dia a dia: antes bastava haver sobreposição de
+    intervalo para bloquear, o que impedia justamente o caso de Pinheiro pela
+    manhã e São Bento à tarde no mesmo dia.
+    """
+    candidata = {
+        "Data Inicio": inicio,
+        "Data Fim": fim,
+        "Turno": turno,
+        "Turnos Por Data": turnos_por_data or {},
+    }
+    conflitos: list[Viagem] = []
+
+    for v in viagens:
+        if ignorar_id is not None and v.get("id") == ignorar_id:
+            continue
+        if int(v.get("Numero Banca Itinerante", 0) or 0) != int(numero_equipe):
+            continue
+        if not banca_vinculada(v, banca):
+            continue
+        v_ini = para_data(v.get("Data Inicio"))
+        v_fim = para_data(v.get("Data Fim"))
+        if not v_ini or not v_fim:
+            continue
+
+        for dia in dias_do_intervalo(max(inicio, v_ini), min(fim, v_fim)):
+            for periodo in (TURNO_MANHA, TURNO_TARDE):
+                if viagem_cobre_periodo(candidata, dia, periodo) and (
+                    viagem_cobre_periodo(v, dia, periodo)
+                ):
+                    conflitos.append(v)
+                    break
+            else:
+                continue
+            break
+    return conflitos
+
+
+def numeros_de_equipe(viagens: Sequence[Viagem], banca: str) -> list[int]:
+    return sorted(
+        {
+            int(v.get("Numero Banca Itinerante", 0) or 0)
+            for v in viagens
+            if v.get("Banca") == banca
+        }
+        - {0}
+    )
+
+
+def proximo_numero_equipe(viagens: Sequence[Viagem], banca: str) -> int:
+    numeros = numeros_de_equipe(viagens, banca)
+    return max(numeros) + 1 if numeros else 1
+
+
+def garantir_numeracao_equipes(viagens: list[Viagem]) -> list[Viagem]:
+    contador: dict[str, int] = {}
+    for v in viagens:
+        banca = v.get("Banca", "")
+        numero = v.get("Numero Banca Itinerante")
+        if not numero:
+            contador[banca] = contador.get(banca, 0) + 1
+            v["Numero Banca Itinerante"] = contador[banca]
         else:
-            grupos.append(grupo_atual)
-            grupo_atual = [d]
-    grupos.append(grupo_atual)
+            contador[banca] = max(contador.get(banca, 0), int(numero))
+    return viagens
+
+
+# --- Efetivo ----------------------------------------------------------------
+def equipes_em_viagem(
+    viagens: Sequence[Viagem], banca: str, data: datetime.date
+) -> dict[str, dict[int, int]]:
+    """Examinadores em viagem por período, agrupados por equipe itinerante.
+
+    Uma equipe que atende dois municípios no mesmo dia em turnos diferentes é
+    contada uma única vez — daí o ``max`` por número de equipe.
+    """
+    resultado: dict[str, dict[int, int]] = {TURNO_MANHA: {}, TURNO_TARDE: {}}
+    for v in viagens:
+        if not banca_vinculada(v, banca):
+            continue
+        quantidade = examinadores_da_banca_na_viagem(v, banca)
+        if quantidade <= 0:
+            continue
+        equipe = int(v.get("Numero Banca Itinerante", 0) or 0)
+        for periodo in (TURNO_MANHA, TURNO_TARDE):
+            if viagem_cobre_periodo(v, data, periodo):
+                atual = resultado[periodo].get(equipe, 0)
+                resultado[periodo][equipe] = max(atual, quantidade)
+    return resultado
+
+
+def efetivo_em_viagem(
+    viagens: Sequence[Viagem], banca: str, data: datetime.date
+) -> tuple[int, int]:
+    equipes = equipes_em_viagem(viagens, banca, data)
+    return sum(equipes[TURNO_MANHA].values()), sum(equipes[TURNO_TARDE].values())
+
+
+def pico_diario(manha: int, tarde: int) -> int:
+    """O efetivo necessário no dia é o maior dos turnos, nunca a soma."""
+    return max(manha, tarde)
+
+
+def agrupar_trechos_por_equipe(
+    viagens: Sequence[Viagem], banca: str | None = None
+) -> list[dict[str, Any]]:
+    """Consolida os trechos de cada equipe itinerante em um único registro."""
+    grupos: dict[tuple[str, int], list[Viagem]] = {}
+    for v in viagens:
+        banca_v = v.get("Banca", "")
+        if banca and banca_v != banca:
+            continue
+        chave = (banca_v, int(v.get("Numero Banca Itinerante", 1) or 1))
+        grupos.setdefault(chave, []).append(v)
+
+    consolidados = []
+    for (banca_v, numero), trechos in sorted(grupos.items()):
+        trechos = sorted(trechos, key=lambda t: para_data(t["Data Inicio"]))
+        inicio = min(para_data(t["Data Inicio"]) for t in trechos)
+        fim = max(para_data(t["Data Fim"]) for t in trechos)
+        destinos: list[str] = []
+        for t in trechos:
+            destino = t.get("Destino", "")
+            if destino and destino not in destinos:
+                destinos.append(destino)
+        consolidados.append(
+            {
+                "Banca": banca_v,
+                "Numero": numero,
+                "Trechos": trechos,
+                "Inicio": inicio,
+                "Fim": fim,
+                "Destinos": destinos,
+                "Examinadores": max(
+                    (total_examinadores(t) for t in trechos), default=0
+                ),
+            }
+        )
+    return consolidados
+
+
+def equipes_ativas_no_intervalo(
+    viagens: Sequence[Viagem],
+    banca: str,
+    inicio: datetime.date,
+    fim: datetime.date,
+) -> list[dict[str, Any]]:
+    """Equipes itinerantes da banca que atuam dentro do intervalo informado."""
+    ativas = []
+    for grupo in agrupar_trechos_por_equipe(viagens):
+        if not any(banca_vinculada(t, banca) for t in grupo["Trechos"]):
+            continue
+        dias = [
+            d
+            for t in grupo["Trechos"]
+            for d in dias_efetivos_da_viagem(t)
+            if inicio <= d <= fim
+        ]
+        if not dias:
+            continue
+        copia = dict(grupo)
+        copia["Inicio Janela"] = min(dias)
+        copia["Fim Janela"] = max(dias)
+        copia["Examinadores"] = max(
+            (
+                examinadores_da_banca_na_viagem(t, banca)
+                for t in grupo["Trechos"]
+            ),
+            default=0,
+        )
+        ativas.append(copia)
+    return ativas
+
+
+def formatar_datas_exames(dias_do_mes: Iterable[int]) -> str:
+    """Agrupa [3,4,5,10] em '03 a 05; 10' para a publicação oficial."""
+    dias = sorted({int(d) for d in dias_do_mes})
+    if not dias:
+        return "-"
+    grupos: list[list[int]] = []
+    atual = [dias[0]]
+    for dia in dias[1:]:
+        if dia == atual[-1] + 1:
+            atual.append(dia)
+        else:
+            grupos.append(atual)
+            atual = [dia]
+    grupos.append(atual)
 
     partes = []
-    for g in grupos:
-        if len(g) == 1:
-            partes.append(f"{g[0]:02d}")
-        elif len(g) == 2:
-            partes.append(f"{g[0]:02d} e {g[1]:02d}")
+    for grupo in grupos:
+        if len(grupo) == 1:
+            partes.append(f"{grupo[0]:02d}")
+        elif len(grupo) == 2:
+            partes.append(f"{grupo[0]:02d} e {grupo[1]:02d}")
         else:
-            partes.append(f"{g[0]:02d} a {g[-1]:02d}")
-
+            partes.append(f"{grupo[0]:02d} a {grupo[-1]:02d}")
     return "; ".join(partes)
 
 
-def gerar_excel_modelo_oficial(df_resumo_completo, mes_sel, ano_sel):
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = "Plan1"
+def bancas_para_validar(banca: str, bancas_apoio: Sequence[str] | None) -> list[str]:
+    bancas = [banca]
+    for outra in bancas_apoio or []:
+        if outra not in bancas:
+            bancas.append(outra)
+    return bancas
 
-    font_padrao = Font(name="Arial", size=10)
-    align_center = Alignment(horizontal="center", vertical="center")
-    align_center_wrap = Alignment(horizontal="center", vertical="center", wrap_text=True)
-    align_left = Alignment(horizontal="left", vertical="center")
 
-    thin = Side(border_style="thin", color="000000")
-    border_all = Border(left=thin, right=thin, top=thin, bottom=thin)
+def bancas_apoio_disponiveis(banca: str) -> list[str]:
+    if banca not in BANCAS_APOIO_CONJUNTO:
+        return []
+    return [b for b in BANCAS_APOIO_CONJUNTO if b != banca]
 
-    larguras_colunas = {
-        "A": 3,
-        "B": 30.29,
-        "C": 8.29,
-        "D": 8.0,
-        "E": 6.86,
-        "F": 8.43,
-        "G": 8.43,
-        "H": 25.29,
+
+# --- Ordenação para os relatórios em PDF ------------------------------------
+def _primeira_data_lancada(df: pd.DataFrame) -> datetime.date:
+    """Data do primeiro exame disponível da localidade (para ordenar)."""
+    if df is None or df.empty:
+        return datetime.date.max
+    disponiveis = df[(df["Status"] == STATUS_DISPONIVEL) & (df["Total"] > 0)]
+    if disponiveis.empty:
+        return datetime.date.max
+    datas = [para_data(d) for d in disponiveis["Data"].unique()]
+    validas = [d for d in datas if d]
+    return min(validas) if validas else datetime.date.max
+
+
+def ordenar_localidades_para_pdf(
+    banca: str,
+    bancas_config: dict[str, list[str]],
+    dados_por_local: dict[str, pd.DataFrame],
+) -> list[tuple[str, str]]:
+    """Ordem de apresentação das localidades no PDF da banca.
+
+    Regra: unidades da sede primeiro, depois a região metropolitana e, por
+    fim, os demais municípios pela data do primeiro exame lançado.
+    Devolve pares (grupo, localidade).
+    """
+    prioridade = ORDEM_PRIORITARIA_PDF.get(banca)
+    if not prioridade:
+        sede = obter_sede(bancas_config, banca)
+        prioridade = [sede] if sede else []
+
+    indice_prioridade = {normalizar_texto(nome): i for i, nome in enumerate(prioridade)}
+
+    prioritarias: list[tuple[int, str]] = []
+    demais: list[tuple[datetime.date, str, str]] = []
+
+    for local, df in dados_por_local.items():
+        chave = normalizar_texto(local)
+        if chave in indice_prioridade:
+            prioritarias.append((indice_prioridade[chave], local))
+        else:
+            demais.append((_primeira_data_lancada(df), normalizar_texto(local), local))
+
+    ordenadas: list[tuple[str, str]] = []
+    for _, local in sorted(prioritarias):
+        grupo = GRUPOS_PDF.get(local)
+        if grupo is None:
+            grupo = GRUPO_SEDE_GENERICO
+        ordenadas.append((grupo, local))
+    for _, _, local in sorted(demais):
+        ordenadas.append((GRUPO_INTERIOR, local))
+    return ordenadas
+
+
+# ===========================================================================
+# 3. PERSISTÊNCIA
+# ===========================================================================
+# SQLite com gravação por entidade e só quando o conteúdo muda de fato.
+
+MAX_SNAPSHOTS = 20
+_LOCK = threading.Lock()
+
+
+class BackupInvalido(Exception):
+    """Arquivo de backup fora do formato esperado."""
+
+
+def caminho_banco() -> Path:
+    return Path(os.environ.get("DETRAN_DB", "dados/detran.db"))
+
+
+def pasta_snapshots() -> Path:
+    return Path(os.environ.get("DETRAN_SNAPSHOTS", "dados/snapshots"))
+
+
+ESQUEMA = """
+CREATE TABLE IF NOT EXISTS config (
+    chave TEXT PRIMARY KEY,
+    valor TEXT NOT NULL,
+    atualizado_em TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS bancas (
+    nome  TEXT PRIMARY KEY,
+    ordem INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS localidades (
+    banca TEXT NOT NULL,
+    nome  TEXT NOT NULL,
+    ordem INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (banca, nome)
+);
+
+CREATE TABLE IF NOT EXISTS viagens (
+    id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+    banca                  TEXT NOT NULL,
+    numero_equipe          INTEGER NOT NULL DEFAULT 1,
+    destino                TEXT NOT NULL,
+    data_inicio            TEXT NOT NULL,
+    data_fim               TEXT NOT NULL,
+    turno                  TEXT NOT NULL DEFAULT 'Dia inteiro',
+    turnos_por_data        TEXT NOT NULL DEFAULT '{}',
+    examinadores           INTEGER NOT NULL DEFAULT 0,
+    bancas_apoio           TEXT NOT NULL DEFAULT '[]',
+    examinadores_por_banca TEXT NOT NULL DEFAULT '{}',
+    observacoes            TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS historico (
+    chave      TEXT NOT NULL,
+    data       TEXT NOT NULL,
+    horario    TEXT NOT NULL,
+    dia_semana TEXT NOT NULL DEFAULT '',
+    status     TEXT NOT NULL,
+    exam_m     INTEGER NOT NULL DEFAULT 0,
+    exam_t     INTEGER NOT NULL DEFAULT 0,
+    vagas      TEXT NOT NULL DEFAULT '{}',
+    total      INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (chave, data, horario)
+);
+
+CREATE TABLE IF NOT EXISTS dias_permitidos (
+    chave TEXT PRIMARY KEY,
+    dias  TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS feriados_locais (
+    chave TEXT PRIMARY KEY,
+    texto TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS disponibilidade_semanal (
+    chave TEXT PRIMARY KEY,
+    valor INTEGER NOT NULL
+);
+"""
+
+
+def _migrar_esquema(conexao: sqlite3.Connection) -> None:
+    """Adiciona colunas novas em bancos criados por versões anteriores."""
+    colunas = {
+        linha["name"] for linha in conexao.execute("PRAGMA table_info(viagens)")
     }
-    for col_letter, largura in larguras_colunas.items():
-        ws.column_dimensions[col_letter].width = largura
-
-    cols_categorias = ["Cat A", "Cat B", "Cat C", "Cat D", "Cat E"]
-    curr_row = 3
-
-    for banca, grp in df_resumo_completo.groupby("Banca", sort=False):
-        banca_nome_pub = banca.replace("Banca ", "")
-
-        ws.merge_cells(start_row=curr_row, start_column=2, end_row=curr_row, end_column=8)
-        cell_titulo = ws.cell(
-            row=curr_row,
-            column=2,
-            value=(
-                f"Quantidade de Exames Mensais de {banca_nome_pub} e Região"
-                f" - {mes_sel.upper()} DE {ano_sel}"
-            ),
-        )
-        cell_titulo.font = font_padrao
-        cell_titulo.alignment = align_center
-        for c in range(2, 9):
-            ws.cell(row=curr_row, column=c).border = border_all
-        curr_row += 1
-
-        headers = ["Cidade"] + cols_categorias + ["Datas dos exames"]
-        for idx_col, h_text in enumerate(headers, 2):
-            cell = ws.cell(row=curr_row, column=idx_col, value=h_text)
-            cell.font = font_padrao
-            cell.alignment = align_center
-            cell.border = border_all
-        curr_row += 1
-
-        for _, r in grp.iterrows():
-            cell_cidade = ws.cell(row=curr_row, column=2, value=str(r["Localidade"]))
-            cell_cidade.font = font_padrao
-            cell_cidade.alignment = align_left
-            cell_cidade.border = border_all
-
-            for idx_col, cat_col in enumerate(cols_categorias, 3):
-                valor = int(r.get(cat_col, 0) or 0)
-                cell = ws.cell(
-                    row=curr_row, column=idx_col, value=valor if valor > 0 else None
-                )
-                cell.font = font_padrao
-                cell.alignment = align_center
-                cell.number_format = "#,##0"
-                cell.border = border_all
-
-            cell_datas = ws.cell(
-                row=curr_row, column=8, value=str(r.get("Datas dos exames", "-"))
+    if colunas and "turnos_por_data" not in colunas:
+        LOG.info("Migrando esquema: adicionando viagens.turnos_por_data")
+        with conexao:
+            conexao.execute(
+                "ALTER TABLE viagens ADD COLUMN turnos_por_data TEXT NOT NULL"
+                " DEFAULT '{}'"
             )
-            cell_datas.font = font_padrao
-            cell_datas.alignment = align_center_wrap
-            cell_datas.number_format = "@"
-            cell_datas.border = border_all
 
-            curr_row += 1
 
-        curr_row += 1
+@st.cache_resource(show_spinner=False)
+def _abrir_conexao(caminho: str) -> sqlite3.Connection:
+    Path(caminho).parent.mkdir(parents=True, exist_ok=True)
+    conexao = sqlite3.connect(caminho, check_same_thread=False)
+    conexao.row_factory = sqlite3.Row
+    conexao.execute("PRAGMA journal_mode=WAL")
+    conexao.execute("PRAGMA synchronous=NORMAL")
+    with conexao:
+        conexao.executescript(ESQUEMA)
+    _migrar_esquema(conexao)
+    LOG.info("Banco aberto em %s", Path(caminho).resolve())
+    return conexao
 
-    ultima_linha_com_dados = curr_row - 2
-    ws.print_area = f"A3:H{max(ultima_linha_com_dados, 3)}"
-    ws.page_setup.orientation = "landscape"
-    ws.page_setup.paperSize = ws.PAPERSIZE_A4
-    ws.page_margins.left = 0.51
-    ws.page_margins.right = 0.51
-    ws.page_margins.top = 0.79
-    ws.page_margins.bottom = 0.79
-    ws.page_margins.header = 0.31
-    ws.page_margins.footer = 0.31
 
+def conectar() -> sqlite3.Connection:
+    return _abrir_conexao(str(caminho_banco()))
+
+
+# --- Utilitários ------------------------------------------------------------
+def _json_seguro(valor: Any) -> Any:
+    if isinstance(valor, (datetime.date, datetime.datetime)):
+        return valor.isoformat()
+    if hasattr(valor, "item"):
+        return valor.item()
+    if isinstance(valor, (set, frozenset)):
+        return sorted(valor)
+    return str(valor)
+
+
+def _dump(valor: Any) -> str:
+    return json.dumps(valor, ensure_ascii=False, default=_json_seguro, allow_nan=False)
+
+
+def _inteiro(valor: Any, padrao: int = 0) -> int:
+    try:
+        if valor is None or (isinstance(valor, float) and pd.isna(valor)):
+            return padrao
+        return int(valor)
+    except (TypeError, ValueError):
+        return padrao
+
+
+def _assinatura(valor: Any) -> str:
+    try:
+        bruto = _dump(valor)
+    except (TypeError, ValueError):
+        bruto = repr(valor)
+    return hashlib.sha1(bruto.encode("utf-8")).hexdigest()
+
+
+def _mudou(nome: str, valor: Any) -> bool:
+    """Evita reescrever o banco a cada clique de widget."""
+    assinaturas = st.session_state.setdefault("_assinaturas", {})
+    nova = _assinatura(valor)
+    if assinaturas.get(nome) == nova:
+        return False
+    assinaturas[nome] = nova
+    return True
+
+
+def _registrar_erro(mensagem: str, excecao: Exception) -> None:
+    LOG.exception(mensagem)
+    st.session_state["erro_persistencia"] = f"{mensagem}: {excecao}"
+
+
+def _marcar_sucesso() -> None:
+    st.session_state["erro_persistencia"] = None
+    st.session_state["ultimo_salvamento"] = datetime.datetime.now().strftime(
+        "%d/%m/%Y %H:%M:%S"
+    )
+
+
+# --- Leitura ----------------------------------------------------------------
+def _ler_config(conexao: sqlite3.Connection, chave: str, padrao: Any) -> Any:
+    linha = conexao.execute(
+        "SELECT valor FROM config WHERE chave = ?", (chave,)
+    ).fetchone()
+    if not linha:
+        return padrao
+    try:
+        return json.loads(linha["valor"])
+    except json.JSONDecodeError:
+        LOG.warning("Config %s corrompida — usando padrão", chave)
+        return padrao
+
+
+def _ler_bancas(conexao: sqlite3.Connection) -> dict[str, list[str]]:
+    bancas: dict[str, list[str]] = {}
+    for linha in conexao.execute("SELECT nome FROM bancas ORDER BY ordem, nome"):
+        bancas[linha["nome"]] = []
+    for linha in conexao.execute(
+        "SELECT banca, nome FROM localidades ORDER BY banca, ordem, nome"
+    ):
+        bancas.setdefault(linha["banca"], []).append(linha["nome"])
+    return bancas
+
+
+def _ler_viagens(conexao: sqlite3.Connection) -> list[Viagem]:
+    viagens = []
+    for linha in conexao.execute("SELECT * FROM viagens ORDER BY data_inicio, id"):
+        try:
+            bancas_apoio = json.loads(linha["bancas_apoio"])
+            por_banca = json.loads(linha["examinadores_por_banca"])
+        except json.JSONDecodeError:
+            bancas_apoio, por_banca = [], {}
+        try:
+            turnos = json.loads(linha["turnos_por_data"])
+        except (json.JSONDecodeError, IndexError, KeyError):
+            turnos = {}
+        viagens.append(
+            {
+                "id": linha["id"],
+                "Banca": linha["banca"],
+                "Numero Banca Itinerante": linha["numero_equipe"],
+                "Destino": linha["destino"],
+                "Data Inicio": para_data(linha["data_inicio"]),
+                "Data Fim": para_data(linha["data_fim"]),
+                "Turno": linha["turno"],
+                "Turnos Por Data": turnos,
+                "Examinadores": linha["examinadores"],
+                "Bancas Apoio": bancas_apoio,
+                "Examinadores Por Banca": por_banca,
+                "Observações": linha["observacoes"],
+            }
+        )
+    return viagens
+
+
+def _ler_historico(conexao: sqlite3.Connection) -> dict[str, pd.DataFrame]:
+    por_chave: dict[str, list[dict[str, Any]]] = {}
+    for linha in conexao.execute(
+        "SELECT * FROM historico ORDER BY chave, data, horario"
+    ):
+        try:
+            vagas = json.loads(linha["vagas"])
+        except json.JSONDecodeError:
+            vagas = {}
+        registro = {
+            "Data": linha["data"],
+            "Dia da Semana": linha["dia_semana"],
+            "Status": linha["status"],
+            "Exam. M": linha["exam_m"],
+            "Exam. T": linha["exam_t"],
+            "Horário": linha["horario"],
+        }
+        for coluna in COLS_VAGAS:
+            registro[coluna] = _inteiro(vagas.get(coluna, 0))
+        registro["Total"] = linha["total"]
+        por_chave.setdefault(linha["chave"], []).append(registro)
+    return {chave: pd.DataFrame(linhas) for chave, linhas in por_chave.items()}
+
+
+def _ler_mapa(conexao: sqlite3.Connection, tabela: str, coluna: str) -> dict[str, Any]:
+    resultado = {}
+    for linha in conexao.execute(f"SELECT chave, {coluna} FROM {tabela}"):
+        valor = linha[coluna]
+        if coluna == "dias":
+            try:
+                valor = json.loads(valor)
+            except json.JSONDecodeError:
+                valor = []
+        resultado[linha["chave"]] = valor
+    return resultado
+
+
+# --- Escrita ----------------------------------------------------------------
+def salvar_config(chave: str, valor: Any, forcar: bool = False) -> None:
+    if not forcar and not _mudou(f"config:{chave}", valor):
+        return
+    conexao = conectar()
+    try:
+        with _LOCK, conexao:
+            conexao.execute(
+                "INSERT INTO config (chave, valor, atualizado_em) VALUES (?, ?, ?) "
+                "ON CONFLICT(chave) DO UPDATE SET valor = excluded.valor, "
+                "atualizado_em = excluded.atualizado_em",
+                (chave, _dump(valor), datetime.datetime.now().isoformat()),
+            )
+        _marcar_sucesso()
+    except Exception as erro:
+        _registrar_erro(f"Falha ao salvar a configuração '{chave}'", erro)
+
+
+def salvar_bancas(bancas_config: dict[str, list[str]], forcar: bool = False) -> None:
+    if not forcar and not _mudou("bancas", bancas_config):
+        return
+    conexao = conectar()
+    try:
+        with _LOCK, conexao:
+            conexao.execute("DELETE FROM bancas")
+            conexao.execute("DELETE FROM localidades")
+            for ordem_banca, (banca, locais) in enumerate(bancas_config.items()):
+                conexao.execute(
+                    "INSERT INTO bancas (nome, ordem) VALUES (?, ?)",
+                    (banca, ordem_banca),
+                )
+                conexao.executemany(
+                    "INSERT INTO localidades (banca, nome, ordem) VALUES (?, ?, ?)",
+                    [(banca, local, i) for i, local in enumerate(locais)],
+                )
+        _marcar_sucesso()
+    except Exception as erro:
+        _registrar_erro("Falha ao salvar bancas e localidades", erro)
+
+
+def salvar_viagens(viagens: list[Viagem], forcar: bool = False) -> None:
+    comparavel = [{k: v for k, v in viagem.items() if k != "id"} for viagem in viagens]
+    if not forcar and not _mudou("viagens", comparavel):
+        return
+    conexao = conectar()
+    try:
+        with _LOCK, conexao:
+            conexao.execute("DELETE FROM viagens")
+            for viagem in viagens:
+                cursor = conexao.execute(
+                    "INSERT INTO viagens (banca, numero_equipe, destino, data_inicio,"
+                    " data_fim, turno, turnos_por_data, examinadores, bancas_apoio,"
+                    " examinadores_por_banca, observacoes)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        viagem.get("Banca", ""),
+                        _inteiro(viagem.get("Numero Banca Itinerante"), 1),
+                        viagem.get("Destino", ""),
+                        para_data(viagem.get("Data Inicio")).isoformat(),
+                        para_data(viagem.get("Data Fim")).isoformat(),
+                        viagem.get("Turno", TURNO_INTEGRAL),
+                        _dump(viagem.get("Turnos Por Data") or {}),
+                        _inteiro(viagem.get("Examinadores")),
+                        _dump(viagem.get("Bancas Apoio") or []),
+                        _dump(viagem.get("Examinadores Por Banca") or {}),
+                        str(viagem.get("Observações", "")),
+                    ),
+                )
+                viagem["id"] = cursor.lastrowid
+        _marcar_sucesso()
+    except Exception as erro:
+        _registrar_erro("Falha ao salvar as viagens", erro)
+
+
+def salvar_historico(chave: str, df: pd.DataFrame, forcar: bool = False) -> None:
+    if df is None or df.empty:
+        return
+    registros = df.to_dict(orient="records")
+    if not forcar and not _mudou(f"historico:{chave}", registros):
+        return
+    conexao = conectar()
+    try:
+        linhas = []
+        for registro in registros:
+            vagas = {c: _inteiro(registro.get(c, 0)) for c in COLS_VAGAS}
+            linhas.append(
+                (
+                    chave,
+                    str(registro.get("Data", "")),
+                    str(registro.get("Horário", "")),
+                    str(registro.get("Dia da Semana", "")),
+                    str(registro.get("Status", STATUS_DISPONIVEL)),
+                    _inteiro(registro.get("Exam. M")),
+                    _inteiro(registro.get("Exam. T")),
+                    _dump(vagas),
+                    _inteiro(registro.get("Total")),
+                )
+            )
+        with _LOCK, conexao:
+            conexao.execute("DELETE FROM historico WHERE chave = ?", (chave,))
+            conexao.executemany(
+                "INSERT INTO historico (chave, data, horario, dia_semana, status,"
+                " exam_m, exam_t, vagas, total)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                linhas,
+            )
+        _marcar_sucesso()
+    except Exception as erro:
+        _registrar_erro(f"Falha ao salvar o calendário '{chave}'", erro)
+
+
+def _salvar_mapa(
+    tabela: str, coluna: str, dados: dict[str, Any], nome_cache: str, forcar: bool
+) -> None:
+    if not forcar and not _mudou(nome_cache, dados):
+        return
+    conexao = conectar()
+    try:
+        with _LOCK, conexao:
+            conexao.execute(f"DELETE FROM {tabela}")
+            conexao.executemany(
+                f"INSERT INTO {tabela} (chave, {coluna}) VALUES (?, ?)",
+                [
+                    (chave, _dump(valor) if coluna == "dias" else valor)
+                    for chave, valor in dados.items()
+                ],
+            )
+        _marcar_sucesso()
+    except Exception as erro:
+        _registrar_erro(f"Falha ao salvar a tabela '{tabela}'", erro)
+
+
+def salvar_dias_permitidos(dados: dict[str, list[str]], forcar: bool = False) -> None:
+    _salvar_mapa("dias_permitidos", "dias", dados, "dias_permitidos", forcar)
+
+
+def salvar_feriados_locais(dados: dict[str, str], forcar: bool = False) -> None:
+    _salvar_mapa("feriados_locais", "texto", dados, "feriados_locais", forcar)
+
+
+def salvar_disponibilidade(dados: dict[str, int], forcar: bool = False) -> None:
+    _salvar_mapa("disponibilidade_semanal", "valor", dados, "disponibilidade", forcar)
+
+
+def remover_historico_do_local(banca: str, local: str) -> None:
+    """Limpeza em cascata do histórico de uma localidade."""
+    conexao = conectar()
+    alvos = [
+        chave
+        for chave in st.session_state.get("historico_localidades", {})
+        if (partes := desmontar_chave_historico(chave))
+        and partes[0] == banca
+        and partes[3] == local
+    ]
+    try:
+        with _LOCK, conexao:
+            for chave in alvos:
+                conexao.execute("DELETE FROM historico WHERE chave = ?", (chave,))
+        for chave in alvos:
+            st.session_state["historico_localidades"].pop(chave, None)
+            st.session_state.get("_assinaturas", {}).pop(f"historico:{chave}", None)
+        _marcar_sucesso()
+    except Exception as erro:
+        _registrar_erro(f"Falha ao remover o histórico de '{local}'", erro)
+
+
+# --- Carga inicial ----------------------------------------------------------
+def _semear_padroes(conexao: sqlite3.Connection) -> None:
+    existe = conexao.execute("SELECT COUNT(*) AS n FROM bancas").fetchone()["n"]
+    if existe:
+        return
+    LOG.info("Banco vazio — semeando estrutura padrão")
+    with _LOCK, conexao:
+        for ordem_banca, (banca, locais) in enumerate(BANCAS_PADRAO.items()):
+            conexao.execute(
+                "INSERT INTO bancas (nome, ordem) VALUES (?, ?)", (banca, ordem_banca)
+            )
+            conexao.executemany(
+                "INSERT INTO localidades (banca, nome, ordem) VALUES (?, ?, ?)",
+                [(banca, local, i) for i, local in enumerate(locais)],
+            )
+        agora = datetime.datetime.now().isoformat()
+        for chave, valor in (
+            ("lista_horarios", HORARIOS_PADRAO),
+            ("horarios_inativos", []),
+            ("capacidade_bancas", CAPACIDADE_BANCAS_PADRAO),
+            ("limite_fora_sede_bancas", LIMITE_FORA_SEDE_PADRAO),
+            ("controle_capacidade_ativo", False),
+            ("schema_version", SCHEMA_VERSION),
+        ):
+            conexao.execute(
+                "INSERT OR REPLACE INTO config (chave, valor, atualizado_em)"
+                " VALUES (?, ?, ?)",
+                (chave, _dump(valor), agora),
+            )
+
+
+def carregar_estado(forcar: bool = False) -> None:
+    """Carrega o banco para o session_state uma vez por sessão."""
+    if st.session_state.get("_estado_carregado") and not forcar:
+        return
+
+    conexao = conectar()
+    _semear_padroes(conexao)
+
+    st.session_state["bancas_config"] = _ler_bancas(conexao)
+    st.session_state["lista_horarios"] = _ler_config(
+        conexao, "lista_horarios", list(HORARIOS_PADRAO)
+    )
+    st.session_state["horarios_inativos"] = _ler_config(
+        conexao, "horarios_inativos", []
+    )
+    st.session_state["capacidade_bancas"] = {
+        **CAPACIDADE_BANCAS_PADRAO,
+        **_ler_config(conexao, "capacidade_bancas", {}),
+    }
+    st.session_state["limite_fora_sede_bancas"] = {
+        **LIMITE_FORA_SEDE_PADRAO,
+        **_ler_config(conexao, "limite_fora_sede_bancas", {}),
+    }
+    st.session_state["controle_capacidade_ativo"] = bool(
+        _ler_config(conexao, "controle_capacidade_ativo", False)
+    )
+    st.session_state["viagens_registradas"] = garantir_numeracao_equipes(
+        _ler_viagens(conexao)
+    )
+    st.session_state["historico_localidades"] = _ler_historico(conexao)
+    st.session_state["dias_permitidos_dict"] = _ler_mapa(
+        conexao, "dias_permitidos", "dias"
+    )
+    st.session_state["feriados_locais_dict"] = _ler_mapa(
+        conexao, "feriados_locais", "texto"
+    )
+    st.session_state["disponibilidade_semanal"] = {
+        chave: _inteiro(valor)
+        for chave, valor in _ler_mapa(
+            conexao, "disponibilidade_semanal", "valor"
+        ).items()
+    }
+
+    st.session_state["_assinaturas"] = {}
+    _mudou("bancas", st.session_state["bancas_config"])
+    _mudou(
+        "viagens",
+        [
+            {k: v for k, v in viagem.items() if k != "id"}
+            for viagem in st.session_state["viagens_registradas"]
+        ],
+    )
+    _mudou("dias_permitidos", st.session_state["dias_permitidos_dict"])
+    _mudou("feriados_locais", st.session_state["feriados_locais_dict"])
+    _mudou("disponibilidade", st.session_state["disponibilidade_semanal"])
+    for chave, df in st.session_state["historico_localidades"].items():
+        _mudou(f"historico:{chave}", df.to_dict(orient="records"))
+
+    st.session_state["_estado_carregado"] = True
+    st.session_state.setdefault("erro_persistencia", None)
+    LOG.info(
+        "Estado carregado: %d bancas, %d viagens, %d calendários",
+        len(st.session_state["bancas_config"]),
+        len(st.session_state["viagens_registradas"]),
+        len(st.session_state["historico_localidades"]),
+    )
+
+
+def recarregar_do_banco() -> None:
+    carregar_estado(forcar=True)
+
+
+# --- Backup -----------------------------------------------------------------
+def montar_backup() -> dict[str, Any]:
+    viagens = []
+    for viagem in st.session_state.get("viagens_registradas", []):
+        copia = dict(viagem)
+        copia.pop("id", None)
+        copia["Data Inicio"] = para_data(viagem.get("Data Inicio")).isoformat()
+        copia["Data Fim"] = para_data(viagem.get("Data Fim")).isoformat()
+        viagens.append(copia)
+
+    historico = {
+        chave: df.fillna(0).to_dict(orient="records")
+        for chave, df in st.session_state.get("historico_localidades", {}).items()
+    }
+
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "gerado_em": datetime.datetime.now().isoformat(),
+        "bancas_config": st.session_state.get("bancas_config", {}),
+        "lista_horarios": st.session_state.get("lista_horarios", []),
+        "horarios_inativos": st.session_state.get("horarios_inativos", []),
+        "historico_localidades": historico,
+        "feriados_locais_dict": st.session_state.get("feriados_locais_dict", {}),
+        "viagens_registradas": viagens,
+        "dias_permitidos_dict": st.session_state.get("dias_permitidos_dict", {}),
+        "capacidade_bancas": st.session_state.get("capacidade_bancas", {}),
+        "limite_fora_sede_bancas": st.session_state.get("limite_fora_sede_bancas", {}),
+        "disponibilidade_semanal": st.session_state.get("disponibilidade_semanal", {}),
+        "controle_capacidade_ativo": st.session_state.get(
+            "controle_capacidade_ativo", False
+        ),
+    }
+
+
+def backup_em_json() -> str:
+    return _dump(montar_backup())
+
+
+CAMPOS_OBRIGATORIOS = {
+    "bancas_config": dict,
+    "viagens_registradas": list,
+    "historico_localidades": dict,
+}
+
+
+def validar_backup(dados: Any) -> dict[str, Any]:
+    """Valida a estrutura antes de aplicar. Levanta ``BackupInvalido``."""
+    if not isinstance(dados, dict):
+        raise BackupInvalido("O arquivo não contém um objeto JSON no nível raiz.")
+
+    versao = dados.get("schema_version")
+    if versao is not None and not isinstance(versao, int):
+        raise BackupInvalido("O campo 'schema_version' deveria ser um número inteiro.")
+    if isinstance(versao, int) and versao > SCHEMA_VERSION:
+        raise BackupInvalido(
+            f"Backup gerado por uma versão mais nova do sistema (schema {versao};"
+            f" esta versão entende até {SCHEMA_VERSION})."
+        )
+
+    for campo, tipo in CAMPOS_OBRIGATORIOS.items():
+        if campo not in dados:
+            raise BackupInvalido(f"Campo obrigatório ausente: '{campo}'.")
+        if not isinstance(dados[campo], tipo):
+            raise BackupInvalido(
+                f"O campo '{campo}' deveria ser {tipo.__name__}, "
+                f"veio {type(dados[campo]).__name__}."
+            )
+
+    for banca, locais in dados["bancas_config"].items():
+        if not isinstance(banca, str) or not isinstance(locais, list):
+            raise BackupInvalido(
+                "Cada banca em 'bancas_config' precisa mapear para uma lista de"
+                " localidades."
+            )
+
+    for indice, viagem in enumerate(dados["viagens_registradas"], 1):
+        if not isinstance(viagem, dict):
+            raise BackupInvalido(f"A viagem nº {indice} não é um objeto.")
+        for campo in ("Banca", "Destino", "Data Inicio", "Data Fim"):
+            if campo not in viagem:
+                raise BackupInvalido(f"A viagem nº {indice} está sem o campo '{campo}'.")
+        if para_data(viagem["Data Inicio"]) is None:
+            raise BackupInvalido(
+                f"A viagem nº {indice} tem data de início ilegível:"
+                f" {viagem['Data Inicio']!r}."
+            )
+        if para_data(viagem["Data Fim"]) is None:
+            raise BackupInvalido(
+                f"A viagem nº {indice} tem data de término ilegível:"
+                f" {viagem['Data Fim']!r}."
+            )
+
+    for chave, registros in dados["historico_localidades"].items():
+        if not isinstance(registros, list):
+            raise BackupInvalido(f"O calendário '{chave}' não é uma lista de linhas.")
+        if desmontar_chave_historico(chave) is None:
+            raise BackupInvalido(
+                f"A chave de calendário '{chave}' está fora do formato esperado"
+                " (banca||mês||ano||localidade)."
+            )
+    return dados
+
+
+def _migrar_viagem_antiga(viagem: dict[str, Any]) -> Viagem:
+    """Converte o formato 'Apoio Conjunto' booleano para a lista explícita."""
+    convertida = dict(viagem)
+    convertida.pop("id", None)
+    convertida["Data Inicio"] = para_data(viagem.get("Data Inicio"))
+    convertida["Data Fim"] = para_data(viagem.get("Data Fim"))
+    convertida.setdefault("Turnos Por Data", {})
+
+    if "Bancas Apoio" not in convertida:
+        convertida["Bancas Apoio"] = []
+    if "Examinadores Por Banca" not in convertida:
+        por_banca: dict[str, int] = {}
+        if viagem.get("Apoio Conjunto"):
+            for banca, campo in (
+                ("Banca Caxias", "Examinadores Caxias"),
+                ("Banca Timon", "Examinadores Timon"),
+            ):
+                if campo in viagem:
+                    por_banca[banca] = _inteiro(viagem[campo])
+            convertida["Bancas Apoio"] = [
+                b for b in por_banca if b != convertida.get("Banca")
+            ]
+        convertida["Examinadores Por Banca"] = por_banca
+    for campo in ("Apoio Conjunto", "Examinadores Caxias", "Examinadores Timon", "Período"):
+        convertida.pop(campo, None)
+    return convertida
+
+
+def aplicar_backup(dados: dict[str, Any]) -> None:
+    validar_backup(dados)
+    salvar_snapshot(motivo="antes_de_restaurar")
+
+    st.session_state["bancas_config"] = dados["bancas_config"]
+    st.session_state["lista_horarios"] = dados.get("lista_horarios") or list(
+        HORARIOS_PADRAO
+    )
+    st.session_state["horarios_inativos"] = dados.get("horarios_inativos", [])
+    st.session_state["feriados_locais_dict"] = dados.get("feriados_locais_dict", {})
+    st.session_state["dias_permitidos_dict"] = dados.get("dias_permitidos_dict", {})
+    st.session_state["capacidade_bancas"] = {
+        **CAPACIDADE_BANCAS_PADRAO,
+        **dados.get("capacidade_bancas", {}),
+    }
+    st.session_state["limite_fora_sede_bancas"] = {
+        **LIMITE_FORA_SEDE_PADRAO,
+        **dados.get("limite_fora_sede_bancas", {}),
+    }
+    st.session_state["disponibilidade_semanal"] = {
+        chave: _inteiro(valor)
+        for chave, valor in (dados.get("disponibilidade_semanal") or {}).items()
+    }
+    st.session_state["controle_capacidade_ativo"] = bool(
+        dados.get("controle_capacidade_ativo", False)
+    )
+    st.session_state["viagens_registradas"] = garantir_numeracao_equipes(
+        [_migrar_viagem_antiga(v) for v in dados["viagens_registradas"]]
+    )
+    st.session_state["historico_localidades"] = {
+        chave: pd.DataFrame(registros)
+        for chave, registros in dados["historico_localidades"].items()
+        if registros
+    }
+
+    st.session_state["_assinaturas"] = {}
+    salvar_bancas(st.session_state["bancas_config"], forcar=True)
+    salvar_viagens(st.session_state["viagens_registradas"], forcar=True)
+    salvar_dias_permitidos(st.session_state["dias_permitidos_dict"], forcar=True)
+    salvar_feriados_locais(st.session_state["feriados_locais_dict"], forcar=True)
+    salvar_disponibilidade(st.session_state["disponibilidade_semanal"], forcar=True)
+    for chave, valor in (
+        ("lista_horarios", st.session_state["lista_horarios"]),
+        ("horarios_inativos", st.session_state["horarios_inativos"]),
+        ("capacidade_bancas", st.session_state["capacidade_bancas"]),
+        ("limite_fora_sede_bancas", st.session_state["limite_fora_sede_bancas"]),
+        ("controle_capacidade_ativo", st.session_state["controle_capacidade_ativo"]),
+    ):
+        salvar_config(chave, valor, forcar=True)
+    for chave, df in st.session_state["historico_localidades"].items():
+        salvar_historico(chave, df, forcar=True)
+
+
+def salvar_snapshot(motivo: str = "manual") -> Path | None:
+    """Snapshot rotativo em disco, mantendo os últimos N arquivos."""
+    try:
+        pasta = pasta_snapshots()
+        pasta.mkdir(parents=True, exist_ok=True)
+        carimbo = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        destino = pasta / f"snapshot_{carimbo}_{motivo}.json"
+        destino.write_text(backup_em_json(), encoding="utf-8")
+
+        existentes = sorted(pasta.glob("snapshot_*.json"))
+        for antigo in existentes[:-MAX_SNAPSHOTS]:
+            antigo.unlink(missing_ok=True)
+        LOG.info("Snapshot gravado em %s", destino)
+        return destino
+    except Exception as erro:
+        _registrar_erro("Falha ao gravar o snapshot de segurança", erro)
+        return None
+
+
+# ===========================================================================
+# 4. EXPORTADORES
+# ===========================================================================
+
+LARGURA_UTIL_A4_PAISAGEM = landscape(A4)[0] - 30  # margens de 15pt
+
+
+def _estilos_pdf() -> dict[str, ParagraphStyle]:
+    base = getSampleStyleSheet()
+    return {
+        "titulo": ParagraphStyle(
+            "TituloOficial",
+            parent=base["Heading1"],
+            fontSize=12,
+            alignment=1,
+            spaceAfter=4,
+        ),
+        "subtitulo": ParagraphStyle(
+            "SubtituloOficial",
+            parent=base["Normal"],
+            fontSize=9,
+            alignment=1,
+            spaceAfter=10,
+        ),
+        "grupo": ParagraphStyle(
+            "GrupoLocalidades",
+            parent=base["Heading2"],
+            fontSize=10,
+            textColor=colors.HexColor(COR_PRIMARIA),
+            spaceBefore=10,
+            spaceAfter=4,
+        ),
+        "local": ParagraphStyle(
+            "NomeLocalidade",
+            parent=base["Heading3"],
+            fontSize=9,
+            textColor=colors.HexColor(COR_SECUNDARIA),
+            spaceBefore=6,
+            spaceAfter=3,
+        ),
+        "nota": ParagraphStyle(
+            "NotaRodape", parent=base["Normal"], fontSize=7.5, textColor=colors.grey
+        ),
+        "corpo": ParagraphStyle("Corpo", parent=base["Normal"], fontSize=8),
+    }
+
+
+def _cabecalho_oficial(elementos: list, estilos: dict, subtitulo: str) -> None:
+    elementos.append(
+        Paragraph(
+            "<b>DETRAN-MA — DEPARTAMENTO ESTADUAL DE TRÂNSITO DO MARANHÃO</b>",
+            estilos["titulo"],
+        )
+    )
+    elementos.append(Paragraph(subtitulo, estilos["subtitulo"]))
+
+
+def _estilo_tabela_padrao(linhas_destaque: Sequence[int] = ()) -> TableStyle:
+    estilo = [
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(COR_PRIMARIA)),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.whitesmoke),
+        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, -1), 7.5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ("TOPPADDING", (0, 0), (-1, -1), 3),
+        ("GRID", (0, 0), (-1, -1), 0.4, colors.grey),
+    ]
+    for indice in linhas_destaque:
+        estilo.extend(
+            [
+                ("BACKGROUND", (0, indice), (-1, indice), colors.HexColor(COR_CLARA)),
+                ("FONTNAME", (0, indice), (-1, indice), "Helvetica-Bold"),
+                ("TEXTCOLOR", (0, indice), (-1, indice), colors.HexColor(COR_PRIMARIA)),
+            ]
+        )
+    return TableStyle(estilo)
+
+
+def _colunas_com_valor(df: pd.DataFrame, colunas: list[str]) -> list[str]:
+    if df is None or df.empty:
+        return []
+    return [c for c in colunas if c in df.columns and df[c].fillna(0).sum() > 0]
+
+
+def _num(valor: Any) -> int:
+    return int(pd.to_numeric(valor, errors="coerce") or 0)
+
+
+def _texto_ou_traco(valor: int) -> str:
+    return "-" if valor == 0 else str(valor)
+
+
+def _apenas_disponiveis(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+    return df[(df["Status"] == STATUS_DISPONIVEL) & (df["Total"] > 0)].copy()
+
+
+def _ordenar_por_data(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df
+    copia = df.copy()
+    copia["_ordem"] = pd.to_datetime(copia["Data"], format="%d/%m/%Y", errors="coerce")
+    return copia.sort_values(["_ordem", "Horário"]).drop(columns=["_ordem"])
+
+
+# --- PDF: grade detalhada de uma localidade ---------------------------------
+def gerar_pdf_localidade(
+    df_dados: pd.DataFrame, banca: str, local: str, mes: str, ano: int | str
+) -> bytes:
+    """Grade de lançamento de vagas, linha a linha por horário."""
     buffer = io.BytesIO()
-    wb.save(buffer)
-    buffer.seek(0)
-    return buffer
-
-
-def gerar_pdf_oficial_enxuto(df_dados, banca, local, mes, ano):
-    buffer = io.BytesIO()
-    doc = SimpleDocTemplate(
+    documento = SimpleDocTemplate(
         buffer,
-        pagesize=landscape(letter),
+        pagesize=landscape(A4),
         rightMargin=15,
         leftMargin=15,
         topMargin=15,
         bottomMargin=15,
+        title=f"Grade de vagas — {local} — {mes}/{ano}",
     )
-    elements = []
-
-    styles = getSampleStyleSheet()
-    title_style = ParagraphStyle(
-        "TitleStyle",
-        parent=styles["Heading1"],
-        fontSize=12,
-        alignment=1,
-        spaceAfter=6,
-    )
-    sub_style = ParagraphStyle(
-        "SubStyle", parent=styles["Normal"], fontSize=9, alignment=1, spaceAfter=12
+    estilos = _estilos_pdf()
+    elementos: list = []
+    _cabecalho_oficial(
+        elementos,
+        estilos,
+        "GRADE DE LANÇAMENTO DE VAGAS DE EXAMES PRÁTICOS — "
+        f"{html.escape(str(banca)).upper()} ({html.escape(str(local)).upper()})"
+        f" — {html.escape(str(mes))}/{html.escape(str(ano))}",
     )
 
-    elements.append(
-        Paragraph(
-            "<b>DETRAN-MA — DEPARTAMENTO ESTADUAL DE TRÂNSITO DO MARANHÃO</b>",
-            title_style,
+    df_filtrado = _ordenar_por_data(_apenas_disponiveis(df_dados))
+    if df_filtrado.empty:
+        elementos.append(
+            Paragraph(
+                "<b>Nenhuma vaga ofertada para os parâmetros selecionados.</b>",
+                estilos["subtitulo"],
+            )
         )
-    )
-    elements.append(
-        Paragraph(
-            f"GRADE DE LANÇAMENTO DE VAGAS DE EXAMES PRÁTICOS — {banca.upper()} ({local.upper()}) — {mes}/{ano}",
-            sub_style,
-        )
-    )
+        documento.build(elementos)
+        return buffer.getvalue()
 
-    df_filtrado = df_dados[
-        (df_dados["Status"] == "Disponível") & (df_dados["Total"] > 0)
-    ].copy()
-
-    pcd_cols = ["PCD A", "PCD B", "PCD C", "PCD D", "PCD E"]
-    pcd_usadas = (
-        [
-            col
-            for col in pcd_cols
-            if col in df_filtrado.columns and df_filtrado[col].sum() > 0
-        ]
-        if not df_filtrado.empty
-        else []
-    )
-
-    cols_vagas_todas = ["Cat A", "Cat B", "Cat C", "Cat D", "Cat E"] + pcd_usadas
-    cols_exibir = (
-        [
-            "Data",
-            "Dia da Semana",
-            "Status",
-            "Exam. M",
-            "Exam. T",
-            "Horário",
-            "Cat A",
-            "Cat B",
-            "Cat C",
-            "Cat D",
-            "Cat E",
-        ]
+    pcd_usadas = _colunas_com_valor(df_filtrado, COLS_PCD)
+    numericas = COLS_CATEGORIA + pcd_usadas + ["Total"]
+    colunas = (
+        ["Data", "Dia da Semana", "Status", "Exam. M", "Exam. T", "Horário"]
+        + COLS_CATEGORIA
         + pcd_usadas
         + ["Total"]
     )
 
-    if df_filtrado.empty:
-        elements.append(
-            Paragraph(
-                "<b>Nenhuma vaga ofertada para os parâmetros selecionados.</b>",
-                sub_style,
+    linhas: list[list[str]] = []
+    destaques: list[int] = []
+    for data_valor, grupo in df_filtrado.groupby("Data", sort=False):
+        for _, registro in grupo.iterrows():
+            linha = []
+            for coluna in colunas:
+                valor = registro.get(coluna, 0)
+                if coluna in numericas:
+                    linha.append(_texto_ou_traco(_num(valor)))
+                else:
+                    linha.append(html.escape(str(valor)))
+            linhas.append(linha)
+
+        subtotal = [f"TOTAL {data_valor}", "", "SUBTOTAL", "-", "-", "-"]
+        for coluna in COLS_CATEGORIA + pcd_usadas:
+            subtotal.append(_texto_ou_traco(int(grupo[coluna].fillna(0).sum())))
+        subtotal.append(str(int(grupo["Total"].fillna(0).sum())))
+        linhas.append(subtotal)
+        destaques.append(len(linhas))
+
+    tabela = Table([colunas] + linhas, repeatRows=1)
+    tabela.setStyle(_estilo_tabela_padrao(destaques))
+    elementos.append(tabela)
+    documento.build(elementos)
+    return buffer.getvalue()
+
+
+# --- PDF: calendário consolidado da banca -----------------------------------
+def _resumo_por_data(df: pd.DataFrame, pcd_usadas: list[str]) -> list[list[str]]:
+    """Uma linha por data, com os horários agregados."""
+    linhas = []
+    for data_valor, grupo in _ordenar_por_data(df).groupby("Data", sort=False):
+        horarios = sorted({str(h) for h in grupo["Horário"]})
+        faixa = (
+            f"{horarios[0]}–{horarios[-1]} ({len(horarios)})"
+            if len(horarios) > 1
+            else (horarios[0] if horarios else "-")
+        )
+        linha = [
+            str(data_valor),
+            str(grupo["Dia da Semana"].iloc[0])[:3],
+            faixa,
+            str(
+                pico_diario(
+                    _num(grupo["Exam. M"].max()), _num(grupo["Exam. T"].max())
+                )
+            ),
+        ]
+        for coluna in COLS_CATEGORIA + pcd_usadas:
+            linha.append(_texto_ou_traco(int(grupo[coluna].fillna(0).sum())))
+        linha.append(str(int(grupo["Total"].fillna(0).sum())))
+        linhas.append(linha)
+    return linhas
+
+
+def gerar_pdf_banca(
+    dados_por_local: dict[str, pd.DataFrame],
+    viagens: Sequence[Viagem],
+    bancas_config: dict[str, list[str]],
+    banca: str,
+    mes: str,
+    ano: int,
+    mes_numero: int,
+    efetivo_maximo: int,
+) -> bytes:
+    """Calendário completo da banca, para conferência antes da publicação.
+
+    As localidades saem na ordem pedida: unidades da sede, região
+    metropolitana e depois os demais municípios pela data do primeiro exame.
+    """
+    buffer = io.BytesIO()
+    documento = SimpleDocTemplate(
+        buffer,
+        pagesize=landscape(A4),
+        rightMargin=15,
+        leftMargin=15,
+        topMargin=15,
+        bottomMargin=15,
+        title=f"Calendário {banca} — {mes}/{ano}",
+    )
+    estilos = _estilos_pdf()
+    elementos: list = []
+    _cabecalho_oficial(
+        elementos,
+        estilos,
+        "CALENDÁRIO CONSOLIDADO DE EXAMES PRÁTICOS — "
+        f"{html.escape(str(banca)).upper()} — {html.escape(str(mes)).upper()}/{ano}",
+    )
+
+    ordenadas = ordenar_localidades_para_pdf(banca, bancas_config, dados_por_local)
+    grupo_atual = None
+    total_geral = 0
+    houve_conteudo = False
+
+    for grupo, local in ordenadas:
+        df_local = _apenas_disponiveis(dados_por_local.get(local))
+        if df_local.empty:
+            continue
+        houve_conteudo = True
+
+        if grupo != grupo_atual:
+            elementos.append(Paragraph(html.escape(grupo), estilos["grupo"]))
+            grupo_atual = grupo
+
+        pcd_usadas = _colunas_com_valor(df_local, COLS_PCD)
+        cabecalho = ["Data", "Dia", "Horários", "Exam."] + COLS_CATEGORIA + pcd_usadas + [
+            "Total"
+        ]
+        linhas = _resumo_por_data(df_local, pcd_usadas)
+
+        total_local = int(df_local["Total"].fillna(0).sum())
+        total_geral += total_local
+        rodape = ["TOTAL", "", "", ""]
+        for coluna in COLS_CATEGORIA + pcd_usadas:
+            rodape.append(_texto_ou_traco(int(df_local[coluna].fillna(0).sum())))
+        rodape.append(str(total_local))
+        linhas.append(rodape)
+
+        dias_unicos = sorted(
+            {d.day for d in (para_data(x) for x in df_local["Data"].unique()) if d}
+        )
+        legenda = (
+            f"<b>{html.escape(local)}</b> — {len(dias_unicos)} dia(s) de exame:"
+            f" {formatar_datas_exames(dias_unicos)} — {total_local} vagas"
+        )
+
+        tabela = Table(
+            [cabecalho] + linhas,
+            repeatRows=1,
+            colWidths=_larguras_proporcionais(len(cabecalho)),
+        )
+        tabela.setStyle(_estilo_tabela_padrao([len(linhas)]))
+        elementos.append(
+            KeepTogether(
+                [Paragraph(legenda, estilos["local"]), tabela, Spacer(1, 4)]
             )
         )
-    else:
-        rows_com_totais = []
-        indices_totais = []
 
-        for data_val, group in df_filtrado.groupby("Data", sort=False):
-            for _, r in group.iterrows():
-                row_list = []
-                for c in cols_exibir:
-                    val = r[c]
-                    if c in cols_vagas_todas + ["Total"]:
-                        row_list.append("-" if val == 0 else str(int(val)))
-                    else:
-                        row_list.append(str(val))
-                rows_com_totais.append(row_list)
+    if not houve_conteudo:
+        elementos.append(
+            Paragraph(
+                "<b>Nenhuma vaga lançada nesta banca para o mês selecionado.</b>",
+                estilos["subtitulo"],
+            )
+        )
+        documento.build(elementos)
+        return buffer.getvalue()
 
-            tot_row = [f"TOTAL {data_val}", "", "SUBTOTAL", "-", "-", "-"]
-            for c in cols_vagas_todas:
-                soma_c = group[c].sum()
-                tot_row.append("-" if soma_c == 0 else str(int(soma_c)))
-            tot_row.append(str(int(group["Total"].sum())))
+    # Painel de efetivo diário da banca no mês.
+    elementos.append(PageBreak())
+    elementos.append(
+        Paragraph("CONFERÊNCIA DE EFETIVO DIÁRIO", estilos["grupo"])
+    )
+    tabela_efetivo = _tabela_efetivo_mensal(
+        dados_por_local, viagens, banca, ano, mes_numero, efetivo_maximo
+    )
+    if tabela_efetivo:
+        elementos.append(tabela_efetivo)
+    elementos.append(Spacer(1, 6))
+    elementos.append(
+        Paragraph(
+            f"Total geral de vagas da banca no mês: <b>{total_geral}</b>."
+            " Documento gerado para conferência interna em "
+            f"{datetime.datetime.now().strftime('%d/%m/%Y às %H:%M')}.",
+            estilos["nota"],
+        )
+    )
 
-            rows_com_totais.append(tot_row)
-            indices_totais.append(len(rows_com_totais))
+    documento.build(elementos)
+    return buffer.getvalue()
 
-        data_table = [cols_exibir] + rows_com_totais
-        t = Table(data_table, repeatRows=1)
 
-        table_styles = [
-            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1A365D")),
-            ("TEXTCOLOR", (0, 0), (-1, 0), colors.whitesmoke),
-            ("ALIGN", (0, 0), (-1, -1), "CENTER"),
-            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-            ("FONTSIZE", (0, 0), (-1, -1), 8),
-            ("BOTTOMPADDING", (0, 0), (-1, 0), 4),
-            ("TOPPADDING", (0, 0), (-1, 0), 4),
-            ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+def _larguras_proporcionais(quantidade_colunas: int) -> list[float]:
+    """Primeira coluna um pouco maior; o resto divide o espaço restante."""
+    if quantidade_colunas <= 0:
+        return []
+    primeira = 52
+    horarios = 62
+    restante = LARGURA_UTIL_A4_PAISAGEM - primeira - horarios - 28
+    demais = max(restante / max(quantidade_colunas - 3, 1), 26)
+    larguras = [primeira, 28, horarios] + [demais] * (quantidade_colunas - 3)
+    return larguras[:quantidade_colunas]
+
+
+def _tabela_efetivo_mensal(
+    dados_por_local: dict[str, pd.DataFrame],
+    viagens: Sequence[Viagem],
+    banca: str,
+    ano: int,
+    mes_numero: int,
+    efetivo_maximo: int,
+) -> Table | None:
+    """Manhã, tarde e pico de examinadores por dia útil do mês."""
+    totais: dict[datetime.date, dict[str, int]] = {}
+
+    for local, df in dados_por_local.items():
+        disponiveis = _apenas_disponiveis(df)
+        if disponiveis.empty:
+            continue
+        for data_texto, grupo in disponiveis.groupby("Data"):
+            data = para_data(data_texto)
+            if not data:
+                continue
+            acumulado = totais.setdefault(data, {"M": 0, "T": 0})
+            em_viagem_m = viagem_do_local(viagens, banca, local, data, TURNO_MANHA)
+            em_viagem_t = viagem_do_local(viagens, banca, local, data, TURNO_TARDE)
+            if not em_viagem_m:
+                acumulado["M"] += _num(grupo["Exam. M"].max())
+            if not em_viagem_t:
+                acumulado["T"] += _num(grupo["Exam. T"].max())
+
+    for numero_dia in range(1, calendar.monthrange(ano, mes_numero)[1] + 1):
+        data = datetime.date(ano, mes_numero, numero_dia)
+        manha, tarde = efetivo_em_viagem(viagens, banca, data)
+        if manha or tarde:
+            acumulado = totais.setdefault(data, {"M": 0, "T": 0})
+            acumulado["M"] += manha
+            acumulado["T"] += tarde
+
+    if not totais:
+        return None
+
+    linhas = [["Data", "Dia", "Manhã", "Tarde", "Pico", "Limite", "Folga"]]
+    destaques = []
+    for data in sorted(totais):
+        valores = totais[data]
+        pico = pico_diario(valores["M"], valores["T"])
+        linhas.append(
+            [
+                formatar_br(data),
+                nome_dia_semana(data)[:3],
+                str(valores["M"]),
+                str(valores["T"]),
+                str(pico),
+                str(efetivo_maximo),
+                str(efetivo_maximo - pico),
+            ]
+        )
+        if pico > efetivo_maximo:
+            destaques.append(len(linhas) - 1)
+
+    tabela = Table(linhas, repeatRows=1)
+    estilo = _estilo_tabela_padrao()
+    for indice in destaques:
+        estilo.add("BACKGROUND", (0, indice), (-1, indice), colors.HexColor("#FED7D7"))
+        estilo.add("TEXTCOLOR", (0, indice), (-1, indice), colors.HexColor(COR_ALERTA))
+    tabela.setStyle(estilo)
+    return tabela
+
+
+# --- PDF: resumo semanal do quadro de examinadores --------------------------
+def gerar_pdf_semana(
+    cabecalho_colunas: list[str],
+    linhas_matriz: list[list[str]],
+    equipes: list[dict[str, Any]],
+    banca: str,
+    mes: str,
+    ano: int,
+    rotulo_semana: str,
+) -> bytes:
+    """Escala semanal do quadro de examinadores, com as equipes em viagem."""
+    buffer = io.BytesIO()
+    documento = SimpleDocTemplate(
+        buffer,
+        pagesize=landscape(A4),
+        rightMargin=15,
+        leftMargin=15,
+        topMargin=15,
+        bottomMargin=15,
+        title=f"Escala semanal — {banca} — {rotulo_semana}",
+    )
+    estilos = _estilos_pdf()
+    elementos: list = []
+    _cabecalho_oficial(
+        elementos,
+        estilos,
+        f"ESCALA SEMANAL DE EXAMINADORES — {html.escape(str(banca)).upper()}"
+        f" — {html.escape(rotulo_semana).upper()} DE {html.escape(str(mes)).upper()}/{ano}",
+    )
+
+    dados = [cabecalho_colunas] + [
+        [html.escape(str(celula)) for celula in linha] for linha in linhas_matriz
+    ]
+    largura_primeira = 150
+    largura_demais = max(
+        (LARGURA_UTIL_A4_PAISAGEM - largura_primeira)
+        / max(len(cabecalho_colunas) - 1, 1),
+        40,
+    )
+    tabela = Table(
+        dados,
+        repeatRows=1,
+        colWidths=[largura_primeira]
+        + [largura_demais] * (len(cabecalho_colunas) - 1),
+    )
+    estilo = _estilo_tabela_padrao([len(dados) - 1])
+    estilo.add("ALIGN", (0, 1), (0, -1), "LEFT")
+    tabela.setStyle(estilo)
+    elementos.append(tabela)
+    elementos.append(Spacer(1, 10))
+
+    elementos.append(Paragraph("EQUIPES ITINERANTES NA SEMANA", estilos["grupo"]))
+    if equipes:
+        linhas_equipes = [
+            ["Equipe", "Período", "Municípios", "Examinadores", "Observação"]
         ]
-
-        for idx in indices_totais:
-            table_styles.append(
-                ("BACKGROUND", (0, idx), (-1, idx), colors.HexColor("#EDF2F7"))
+        for equipe in equipes:
+            linhas_equipes.append(
+                [
+                    f"Banca {int(equipe['Numero']):02d}",
+                    f"{formatar_br(equipe['Inicio Janela'])} a"
+                    f" {formatar_br(equipe['Fim Janela'])}",
+                    html.escape(" / ".join(equipe["Destinos"])),
+                    f"{int(equipe['Examinadores']):02d}",
+                    html.escape(equipe.get("Observacao", "") or "-"),
+                ]
             )
-            table_styles.append(
-                ("FONTNAME", (0, idx), (-1, idx), "Helvetica-Bold")
-            )
-            table_styles.append(
-                ("TEXTCOLOR", (0, idx), (-1, idx), colors.HexColor("#1A365D"))
-            )
+        tabela_equipes = Table(
+            linhas_equipes,
+            repeatRows=1,
+            colWidths=[60, 120, 240, 70, LARGURA_UTIL_A4_PAISAGEM - 490],
+        )
+        estilo_equipes = _estilo_tabela_padrao()
+        estilo_equipes.add("ALIGN", (2, 1), (2, -1), "LEFT")
+        estilo_equipes.add("ALIGN", (4, 1), (4, -1), "LEFT")
+        tabela_equipes.setStyle(estilo_equipes)
+        elementos.append(tabela_equipes)
+    else:
+        elementos.append(
+            Paragraph("Nenhuma equipe em viagem nesta semana.", estilos["corpo"])
+        )
 
-        t.setStyle(TableStyle(table_styles))
-        elements.append(t)
+    elementos.append(Spacer(1, 8))
+    elementos.append(
+        Paragraph(
+            "Legenda: número = examinadores previstos · <b>Viagem</b> = equipe"
+            " itinerante em deslocamento · <b>x</b> = sem lançamento ·"
+            " <b>-</b> = dia fora da grade da localidade. Gerado em "
+            f"{datetime.datetime.now().strftime('%d/%m/%Y às %H:%M')}.",
+            estilos["nota"],
+        )
+    )
+    documento.build(elementos)
+    return buffer.getvalue()
 
-    doc.build(elements)
-    buffer.seek(0)
-    return buffer
 
+# --- PDF: escala mensal de viagens itinerantes ------------------------------
+def gerar_pdf_escala_viagens(
+    viagens: Sequence[Viagem], mes: str, ano: int, mes_numero: int
+) -> bytes:
+    """Escala de viagens do mês, com preposto e veículo por equipe.
 
-# --- HEADER ---
-st.markdown(
+    A logística (01 preposto e 01 veículo por equipe itinerante) é atribuída
+    automaticamente aqui: não há cadastro disso na interface, conforme
+    solicitado — é informação que existe apenas neste documento.
     """
-    <div class="header-container">
-        <h1>🚗 DETRAN/MA — Sistema de Gestão de Exames Práticos</h1>
-        <p>Planejamento de Vagas, Controle de Efetivo de Examinadores e Distribuição por Localidades</p>
-    </div>
-""",
-    unsafe_allow_html=True,
-)
-
-# --- BARRA LATERAL: BACKUP MANUAL ---
-with st.sidebar.expander("💾 Backup de Segurança", expanded=False):
-    st.caption(
-        "Seu progresso é salvo automaticamente a cada ação. Use os botões"
-        " abaixo só se quiser guardar uma cópia extra ou restaurar um"
-        " backup específico."
+    buffer = io.BytesIO()
+    documento = SimpleDocTemplate(
+        buffer,
+        pagesize=landscape(A4),
+        rightMargin=18,
+        leftMargin=18,
+        topMargin=18,
+        bottomMargin=18,
+        title=f"Escala de viagens — {mes}/{ano}",
+    )
+    estilos = _estilos_pdf()
+    elementos: list = []
+    _cabecalho_oficial(
+        elementos,
+        estilos,
+        "ESCALA DE VIAGENS DAS BANCAS ITINERANTES — "
+        f"{html.escape(str(mes)).upper()} DE {ano}",
     )
 
-    nome_arquivo_backup = (
-        f"backup_detran_{datetime.datetime.now().strftime('%Y%m%d_%H%M')}.json"
+    primeiro = datetime.date(ano, mes_numero, 1)
+    ultimo = datetime.date(ano, mes_numero, calendar.monthrange(ano, mes_numero)[1])
+
+    grupos = agrupar_trechos_por_equipe(viagens)
+    do_mes = []
+    for grupo in grupos:
+        dias = [
+            d
+            for t in grupo["Trechos"]
+            for d in dias_efetivos_da_viagem(t)
+            if primeiro <= d <= ultimo
+        ]
+        if not dias:
+            continue
+        copia = dict(grupo)
+        copia["Inicio Mes"] = min(dias)
+        copia["Fim Mes"] = max(dias)
+        do_mes.append(copia)
+
+    if not do_mes:
+        elementos.append(
+            Paragraph(
+                "<b>Nenhuma viagem programada para o mês selecionado.</b>",
+                estilos["subtitulo"],
+            )
+        )
+        documento.build(elementos)
+        return buffer.getvalue()
+
+    total_examinadores_mes = 0
+    total_prepostos = 0
+    total_veiculos = 0
+
+    for banca in sorted({g["Banca"] for g in do_mes}):
+        elementos.append(Paragraph(html.escape(banca).upper(), estilos["grupo"]))
+
+        linhas = [
+            [
+                "Banca\nItinerante",
+                "Período",
+                "Municípios",
+                "Equipe",
+                "Veículo",
+                "Detalhamento por dia",
+            ]
+        ]
+        for grupo in sorted(
+            (g for g in do_mes if g["Banca"] == banca), key=lambda g: g["Numero"]
+        ):
+            examinadores = int(grupo["Examinadores"])
+            total_examinadores_mes += examinadores
+            total_prepostos += PREPOSTOS_POR_EQUIPE
+            total_veiculos += VEICULOS_POR_EQUIPE
+
+            detalhes = []
+            for trecho in grupo["Trechos"]:
+                dias = [
+                    d
+                    for d in dias_efetivos_da_viagem(trecho)
+                    if primeiro <= d <= ultimo
+                ]
+                if not dias:
+                    continue
+                turnos = {turno_da_viagem_no_dia(trecho, d) for d in dias}
+                if turnos == {TURNO_INTEGRAL}:
+                    sufixo = ""
+                else:
+                    sufixo = " (" + ", ".join(
+                        f"{formatar_curto(d)} {turno_da_viagem_no_dia(trecho, d).lower()}"
+                        for d in dias
+                        if turno_da_viagem_no_dia(trecho, d) != TURNO_INTEGRAL
+                    ) + ")"
+                detalhes.append(
+                    f"{trecho.get('Destino')}: {formatar_curto(min(dias))} a"
+                    f" {formatar_curto(max(dias))}{sufixo}"
+                )
+
+            observacoes = [
+                str(t.get("Observações", "")).strip()
+                for t in grupo["Trechos"]
+                if str(t.get("Observações", "")).strip()
+            ]
+            if observacoes:
+                detalhes.append("Obs.: " + "; ".join(dict.fromkeys(observacoes)))
+
+            linhas.append(
+                [
+                    f"Banca {int(grupo['Numero']):02d}",
+                    f"{formatar_br(grupo['Inicio Mes'])}\na"
+                    f" {formatar_br(grupo['Fim Mes'])}",
+                    Paragraph(
+                        html.escape(" e ".join(grupo["Destinos"])), estilos["corpo"]
+                    ),
+                    f"{examinadores:02d} examinadores\n+"
+                    f" {PREPOSTOS_POR_EQUIPE:02d} preposto",
+                    f"{VEICULOS_POR_EQUIPE:02d} veículo",
+                    Paragraph(html.escape(" · ".join(detalhes)), estilos["corpo"]),
+                ]
+            )
+
+        tabela = Table(
+            linhas,
+            repeatRows=1,
+            colWidths=[62, 92, 150, 96, 54, LARGURA_UTIL_A4_PAISAGEM - 454],
+        )
+        estilo = _estilo_tabela_padrao()
+        estilo.add("ALIGN", (2, 1), (2, -1), "LEFT")
+        estilo.add("ALIGN", (5, 1), (5, -1), "LEFT")
+        estilo.add("VALIGN", (0, 1), (-1, -1), "TOP")
+        tabela.setStyle(estilo)
+        elementos.append(tabela)
+        elementos.append(Spacer(1, 8))
+
+    resumo = Table(
+        [
+            ["TOTAL DO MÊS", "Equipes", "Examinadores", "Prepostos", "Veículos"],
+            [
+                "",
+                f"{len(do_mes):02d}",
+                f"{total_examinadores_mes:02d}",
+                f"{total_prepostos:02d}",
+                f"{total_veiculos:02d}",
+            ],
+        ],
+        colWidths=[140, 90, 110, 90, 90],
     )
-    st.download_button(
-        label="⬇️ Baixar backup agora",
-        data=json.dumps(
-            montar_estado_para_backup(),
-            ensure_ascii=False,
-            default=_numero_seguro_para_json,
-        ),
-        file_name=nome_arquivo_backup,
-        mime="application/json",
+    resumo.setStyle(_estilo_tabela_padrao([1]))
+    elementos.append(resumo)
+    elementos.append(Spacer(1, 6))
+    elementos.append(
+        Paragraph(
+            "Cada banca itinerante conta com 01 preposto e 01 veículo atrelados à"
+            " equipe de examinadores. Documento gerado em "
+            f"{datetime.datetime.now().strftime('%d/%m/%Y às %H:%M')}.",
+            estilos["nota"],
+        )
     )
+    documento.build(elementos)
+    return buffer.getvalue()
 
-    backup_enviado = st.file_uploader(
-        "Restaurar um backup (.json):", type=["json"], key="upload_backup"
-    )
-    if backup_enviado is not None:
-        if st.button("♻️ Restaurar este backup"):
-            try:
-                dados_backup = json.load(backup_enviado)
-                aplicar_estado_do_backup(dados_backup)
-                st.success("Backup restaurado com sucesso!")
-                st.rerun()
-            except Exception as e:
-                st.error(f"Não foi possível ler este arquivo de backup: {e}")
 
-if st.session_state.get("ultimo_autosave"):
-    st.caption(f"💾 Último salvamento automático: {st.session_state['ultimo_autosave']}")
-if st.session_state.get("erro_autosave"):
-    st.warning(f"⚠️ O salvamento automático apresentou erro: {st.session_state['erro_autosave']}")
+# --- Excel de publicação ----------------------------------------------------
+@st.cache_data(show_spinner=False)
+def gerar_excel_publicacao(
+    df_resumo: pd.DataFrame, mes: str, ano: int | str, incluir_pcd: bool = True
+) -> bytes:
+    """Planilha no layout usado para publicação do calendário mensal."""
+    planilha = openpyxl.Workbook()
+    aba = planilha.active
+    aba.title = "Plan1"
 
-aba_quadro, aba_cal, aba_viagens, aba_horarios, aba_relatorio, aba_gestao = (
-    st.tabs([
-        "🗓️ Quadro Geral de Examinadores",
-        "📅 Montar Calendário Detalhado",
-        "🚍 Gestão de Viagens Itinerantes",
-        "⏰ Horários & Turmas",
-        "📊 Dashboard Consolidado",
-        "➕ Gestão de Localidades",
-    ])
-)
+    fonte = Font(name="Arial", size=10)
+    centro = Alignment(horizontal="center", vertical="center")
+    centro_quebra = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    esquerda = Alignment(horizontal="left", vertical="center")
+    fina = Side(border_style="thin", color="000000")
+    borda = Border(left=fina, right=fina, top=fina, bottom=fina)
 
-# --- ABA: QUADRO GERAL DE EXAMINADORES ---
-with aba_quadro:
+    colunas_vagas = list(COLS_CATEGORIA)
+    if incluir_pcd:
+        colunas_vagas += _colunas_com_valor(df_resumo, COLS_PCD)
+
+    larguras = {"A": 3, "B": 30.29}
+    for indice in range(len(colunas_vagas)):
+        larguras[chr(ord("C") + indice)] = 8.43
+    larguras[chr(ord("C") + len(colunas_vagas))] = 25.29
+    for letra, largura in larguras.items():
+        aba.column_dimensions[letra].width = largura
+
+    ultima_coluna = 2 + len(colunas_vagas) + 1
+    linha_atual = 3
+
+    for banca, grupo in df_resumo.groupby("Banca", sort=False):
+        nome_publicacao = str(banca).replace("Banca ", "")
+        aba.merge_cells(
+            start_row=linha_atual,
+            start_column=2,
+            end_row=linha_atual,
+            end_column=ultima_coluna,
+        )
+        titulo = aba.cell(
+            row=linha_atual,
+            column=2,
+            value=(
+                f"Quantidade de Exames Mensais de {nome_publicacao} e Região"
+                f" - {str(mes).upper()} DE {ano}"
+            ),
+        )
+        titulo.font = fonte
+        titulo.alignment = centro
+        for coluna in range(2, ultima_coluna + 1):
+            aba.cell(row=linha_atual, column=coluna).border = borda
+        linha_atual += 1
+
+        for indice, texto in enumerate(
+            ["Cidade"] + colunas_vagas + ["Datas dos exames"], 2
+        ):
+            celula = aba.cell(row=linha_atual, column=indice, value=texto)
+            celula.font = fonte
+            celula.alignment = centro
+            celula.border = borda
+        linha_atual += 1
+
+        for _, registro in grupo.iterrows():
+            celula_cidade = aba.cell(
+                row=linha_atual, column=2, value=str(registro["Localidade"])
+            )
+            celula_cidade.font = fonte
+            celula_cidade.alignment = esquerda
+            celula_cidade.border = borda
+
+            for indice, coluna in enumerate(colunas_vagas, 3):
+                valor = _num(registro.get(coluna, 0))
+                celula = aba.cell(
+                    row=linha_atual, column=indice, value=valor if valor > 0 else None
+                )
+                celula.font = fonte
+                celula.alignment = centro
+                celula.number_format = "#,##0"
+                celula.border = borda
+
+            celula_datas = aba.cell(
+                row=linha_atual,
+                column=ultima_coluna,
+                value=str(registro.get("Datas dos exames", "-")),
+            )
+            celula_datas.font = fonte
+            celula_datas.alignment = centro_quebra
+            celula_datas.number_format = "@"
+            celula_datas.border = borda
+            linha_atual += 1
+
+        linha_atual += 1
+
+    ultima_linha = max(linha_atual - 2, 3)
+    aba.print_area = f"A3:{chr(ord('A') + ultima_coluna - 1)}{ultima_linha}"
+    aba.page_setup.orientation = "landscape"
+    aba.page_setup.paperSize = aba.PAPERSIZE_A4
+    aba.page_margins.left = 0.51
+    aba.page_margins.right = 0.51
+    aba.page_margins.top = 0.79
+    aba.page_margins.bottom = 0.79
+    aba.page_margins.header = 0.31
+    aba.page_margins.footer = 0.31
+
+    buffer = io.BytesIO()
+    planilha.save(buffer)
+    return buffer.getvalue()
+
+
+# ===========================================================================
+# 5. COMPONENTES DE INTERFACE
+# ===========================================================================
+
+
+def _botao_abrir_pdf(pdf_bytes: bytes, chave: str, rotulo: str) -> None:
+    """Botão que abre o PDF em uma nova aba do navegador.
+
+    Usa Blob + URL.createObjectURL em vez de um link ``data:``: o Chrome
+    bloqueia navegação de nível superior para URLs ``data:``, então o link
+    simples não abriria a aba.
+    """
+    b64 = base64.b64encode(pdf_bytes).decode("ascii")
+    identificador = re.sub(r"[^A-Za-z0-9_]", "_", chave)
+    componente = f"""
+    <button id="abrir_{identificador}" style="
+        width: 100%;
+        padding: 0.55rem 0.75rem;
+        border-radius: 6px;
+        border: 1px solid #2B6CB0;
+        background: #2B6CB0;
+        color: #fff;
+        font-weight: 600;
+        font-size: 0.9rem;
+        font-family: 'Source Sans Pro', sans-serif;
+        cursor: pointer;">{html.escape(rotulo)}</button>
+    <script>
+      (function() {{
+        const dados = "{b64}";
+        const botao = document.getElementById("abrir_{identificador}");
+        botao.addEventListener("click", function() {{
+          const binario = atob(dados);
+          const bytes = new Uint8Array(binario.length);
+          for (let i = 0; i < binario.length; i++) {{
+            bytes[i] = binario.charCodeAt(i);
+          }}
+          const blob = new Blob([bytes], {{ type: "application/pdf" }});
+          const url = URL.createObjectURL(blob);
+          const aba = window.open(url, "_blank");
+          if (!aba) {{
+            alert("O navegador bloqueou a nova aba. Libere os pop-ups deste site.");
+          }}
+          setTimeout(function() {{ URL.revokeObjectURL(url); }}, 60000);
+        }});
+      }})();
+    </script>
+    """
+    components.html(componente, height=52)
+
+
+def _previa_pdf(pdf_bytes: bytes, chave: str, altura: int = 620) -> None:
+    """Pré-visualização embutida do PDF, para conferir sem sair da página."""
+    b64 = base64.b64encode(pdf_bytes).decode("ascii")
+    identificador = re.sub(r"[^A-Za-z0-9_]", "_", chave)
+    componente = f"""
+    <div id="previa_{identificador}" style="width:100%;height:{altura}px;"></div>
+    <script>
+      (function() {{
+        const dados = "{b64}";
+        const binario = atob(dados);
+        const bytes = new Uint8Array(binario.length);
+        for (let i = 0; i < binario.length; i++) {{
+          bytes[i] = binario.charCodeAt(i);
+        }}
+        const blob = new Blob([bytes], {{ type: "application/pdf" }});
+        const url = URL.createObjectURL(blob);
+        const quadro = document.createElement("iframe");
+        quadro.src = url;
+        quadro.style.width = "100%";
+        quadro.style.height = "100%";
+        quadro.style.border = "1px solid #CBD5E0";
+        quadro.style.borderRadius = "6px";
+        document.getElementById("previa_{identificador}").appendChild(quadro);
+      }})();
+    </script>
+    """
+    components.html(componente, height=altura + 10)
+
+
+def bloco_pdf(
+    *,
+    chave: str,
+    rotulo_gerar: str,
+    gerador,
+    nome_arquivo: str,
+    ajuda: str | None = None,
+    altura_previa: int = 620,
+) -> None:
+    """Fluxo padrão de PDF: gerar, conferir e só então baixar.
+
+    O PDF é montado apenas quando solicitado — antes ele era remontado a cada
+    interação com qualquer widget da página.
+    """
+    chave_bytes = f"_pdf_{chave}"
+    chave_previa = f"_previa_{chave}"
+
+    if st.button(rotulo_gerar, key=f"btn_gerar_{chave}", help=ajuda):
+        try:
+            st.session_state[chave_bytes] = gerador()
+            st.session_state[chave_previa] = True
+        except Exception as erro:
+            LOG.exception("Falha ao gerar o PDF %s", chave)
+            st.error(f"Não foi possível gerar o PDF: {erro}")
+
+    pdf_bytes = st.session_state.get(chave_bytes)
+    if not pdf_bytes:
+        return
+
+    tamanho_kb = len(pdf_bytes) / 1024
+    st.caption(f"Documento pronto ({tamanho_kb:.0f} KB) — confira antes de baixar.")
+
+    col_abrir, col_baixar = st.columns(2)
+    with col_abrir:
+        _botao_abrir_pdf(pdf_bytes, chave, "🔎 Abrir em nova aba")
+    with col_baixar:
+        st.download_button(
+            "⬇️ Baixar PDF",
+            data=pdf_bytes,
+            file_name=nome_arquivo,
+            mime="application/pdf",
+            key=f"btn_baixar_{chave}",
+            **LARGURA_TOTAL,
+        )
+
+    if st.checkbox(
+        "👁️ Pré-visualizar aqui na página",
+        value=bool(st.session_state.get(chave_previa)),
+        key=f"chk_previa_{chave}",
+    ):
+        _previa_pdf(pdf_bytes, chave, altura_previa)
+
+
+def dados_da_banca_no_mes(banca: str, mes: str, ano: int) -> dict[str, pd.DataFrame]:
+    """Calendários já lançados de todas as localidades da banca no mês."""
+    resultado: dict[str, pd.DataFrame] = {}
+    for chave, df in st.session_state["historico_localidades"].items():
+        partes = desmontar_chave_historico(chave)
+        if not partes:
+            continue
+        banca_chave, mes_chave, ano_chave, local = partes
+        if (banca_chave, mes_chave, ano_chave) == (banca, mes, str(ano)):
+            resultado[local] = df
+    return resultado
+
+
+# ===========================================================================
+# 6. ABAS
+# ===========================================================================
+
+
+# --- Aba: quadro matriz de examinadores -------------------------------------
+def _agrupar_por_semana(
+    dias: list[datetime.date],
+) -> dict[datetime.date, list[datetime.date]]:
+    """Agrupa dias úteis pela segunda-feira da semana (única, ao contrário do
+    número ISO, que se repete na virada do ano)."""
+    semanas: dict[datetime.date, list[datetime.date]] = {}
+    for dia in dias:
+        segunda = dia - datetime.timedelta(days=dia.weekday())
+        semanas.setdefault(segunda, []).append(dia)
+    return dict(sorted(semanas.items()))
+
+
+def _celula_do_quadro(
+    banca: str,
+    local: str,
+    dia: datetime.date,
+    df_local: pd.DataFrame | None,
+    feriados: frozenset[datetime.date],
+    viagens: Sequence[Viagem],
+) -> str:
+    """Conteúdo da célula do quadro matriz.
+
+    Localidade atendida por equipe itinerante mostra apenas a marcação de
+    viagem: o efetivo dela é contabilizado uma única vez na linha de total,
+    pela equipe, e não somado por município.
+    """
+    viagem = viagem_do_local_no_dia(viagens, banca, local, dia)
+    if viagem:
+        numero = int(viagem.get("Numero Banca Itinerante", 0) or 0)
+        turno = turno_da_viagem_no_dia(viagem, dia)
+        marcador = f"Viagem {numero:02d}"
+        if turno in (TURNO_MANHA, TURNO_TARDE):
+            marcador += " (M)" if turno == TURNO_MANHA else " (T)"
+        return marcador
+
+    data_texto = dia.strftime("%d/%m/%Y")
+    if df_local is not None and not df_local.empty:
+        do_dia = df_local[df_local["Data"] == data_texto]
+        if not do_dia.empty and (do_dia["Status"] == STATUS_FERIADO).any():
+            return "Feriado"
+        disponiveis = do_dia[do_dia["Status"] == STATUS_DISPONIVEL]
+        if not disponiveis.empty:
+            return str(
+                pico_diario(
+                    _num(disponiveis["Exam. M"].max()),
+                    _num(disponiveis["Exam. T"].max()),
+                )
+            )
+
+    if dia in feriados:
+        return "Feriado"
+    return "x"
+
+
+def _montar_matriz_semana(
+    banca: str,
+    mes_nome: str,
+    ano: int,
+    dias_semana: list[datetime.date],
+    feriados: frozenset[datetime.date],
+) -> tuple[list[str], list[list[str]]]:
+    bancas_config = st.session_state["bancas_config"]
+    viagens = st.session_state["viagens_registradas"]
+    historico = st.session_state["historico_localidades"]
+    dias_permitidos_dict = st.session_state["dias_permitidos_dict"]
+    localidades = bancas_config.get(banca, [])
+
+    linhas: list[list[str]] = []
+    for local in localidades:
+        linha = [local]
+        df_local = historico.get(chave_historico(banca, mes_nome, ano, local))
+        permitidos = dias_permitidos_dict.get(
+            chave_local(banca, local), DIAS_UTEIS_PADRAO
+        )
+        for dia in dias_semana:
+            if nome_dia_semana(dia) not in permitidos and not viagem_do_local_no_dia(
+                viagens, banca, local, dia
+            ):
+                linha.append("-")
+                continue
+            linha.append(
+                _celula_do_quadro(banca, local, dia, df_local, feriados, viagens)
+            )
+        linhas.append(linha)
+
+    linha_total = ["TOTAL EXAMINADORES EM CAMPO"]
+    for dia in dias_semana:
+        total_manha = 0
+        total_tarde = 0
+        for local in localidades:
+            permitidos = dias_permitidos_dict.get(
+                chave_local(banca, local), DIAS_UTEIS_PADRAO
+            )
+            if nome_dia_semana(dia) not in permitidos:
+                continue
+            df_local = historico.get(chave_historico(banca, mes_nome, ano, local))
+            if df_local is None or df_local.empty:
+                continue
+            do_dia = df_local[
+                (df_local["Data"] == dia.strftime("%d/%m/%Y"))
+                & (df_local["Status"] == STATUS_DISPONIVEL)
+            ]
+            if do_dia.empty:
+                continue
+            # Localidade em viagem não soma pelo município: o efetivo entra
+            # uma única vez pela equipe itinerante, logo abaixo.
+            if not viagem_do_local(viagens, banca, local, dia, TURNO_MANHA):
+                total_manha += _num(do_dia["Exam. M"].max())
+            if not viagem_do_local(viagens, banca, local, dia, TURNO_TARDE):
+                total_tarde += _num(do_dia["Exam. T"].max())
+
+        manha_viagem, tarde_viagem = efetivo_em_viagem(viagens, banca, dia)
+        total_manha += manha_viagem
+        total_tarde += tarde_viagem
+        linha_total.append(str(pico_diario(total_manha, total_tarde)))
+    linhas.append(linha_total)
+
+    cabecalho = ["Localidade"] + [d.strftime("%d/%m (%a)") for d in dias_semana]
+    return cabecalho, linhas
+
+
+def aba_quadro() -> None:
     st.markdown("### 🗓️ Quadro Matriz de Distribuição de Examinadores")
 
-    BANCAS_COM_QUADRO_MATRIZ = ["Banca São Luís", "Banca Imperatriz"]
+    bancas_config = st.session_state["bancas_config"]
+    disponiveis = [b for b in BANCAS_COM_QUADRO_MATRIZ if b in bancas_config]
+    if not disponiveis:
+        st.info("Nenhuma das bancas com quadro matriz está cadastrada no momento.")
+        return
 
-    col_q1, col_q2, col_q3 = st.columns(3)
-    with col_q1:
-        banca_q = st.selectbox(
-            "Selecione a Banca:",
-            BANCAS_COM_QUADRO_MATRIZ,
-            key="q_banca",
-        )
-    with col_q2:
-        mes_q = st.selectbox(
-            "Mês de Visualização:", MESES_LISTA, index=10, key="q_mes"
-        )
-        mes_num_q = MESES_LISTA.index(mes_q) + 1
-    with col_q3:
-        ano_q = st.selectbox("Ano de Visualização:", ANOS_LISTA, index=0, key="q_ano")
+    col_banca, col_mes, col_ano = st.columns(3)
+    banca = col_banca.selectbox("Selecione a Banca:", disponiveis, key="q_banca")
+    mes_nome = col_mes.selectbox(
+        "Mês de Visualização:", MESES_LISTA, index=indice_mes_atual(), key="q_mes"
+    )
+    ano = col_ano.selectbox(
+        "Ano de Visualização:", anos_disponiveis(), index=0, key="q_ano"
+    )
+    mes_numero = numero_do_mes(mes_nome)
 
     st.markdown("---")
 
-    cal = calendar.Calendar(firstweekday=0)
-    dias_mes = [
+    calendario_mes = calendar.Calendar(firstweekday=0)
+    dias_uteis = [
         d
-        for d in cal.itermonthdates(ano_q, mes_num_q)
-        if d.month == mes_num_q and d.weekday() < 5
+        for d in calendario_mes.itermonthdates(ano, mes_numero)
+        if d.month == mes_numero and d.weekday() < 5
     ]
+    if not dias_uteis:
+        st.info("Não há dias úteis neste mês.")
+        return
+    if not bancas_config.get(banca):
+        st.warning(f"A banca {banca} não possui localidades cadastradas.")
+        return
 
-    try:
-        feriados_oficiais_q = holidays.Brazil(subdiv="MA", years=ano_q)
-    except TypeError:
-        feriados_oficiais_q = holidays.BR(state="MA", years=ano_q)
+    feriados = feriados_estaduais(ano)
+    viagens = st.session_state["viagens_registradas"]
 
-    semanas = {}
-    for d in dias_mes:
-        num_semana = d.isocalendar()[1]
-        if num_semana not in semanas:
-            semanas[num_semana] = []
-        semanas[num_semana].append(d)
-
-    locais_banca = st.session_state["bancas_config"][banca_q]
-
-    for idx, (sem, dias_sem) in enumerate(semanas.items(), 1):
-        ini_sem = dias_sem[0].strftime("%d")
-        fim_sem = dias_sem[-1].strftime("%d")
-        st.markdown(f"#### 📅 Semana {idx} ({ini_sem} a {fim_sem} de {mes_q})")
-
-        matriz_dados = []
-
-        for loc in locais_banca:
-            linha = [loc]
-            chave_loc = f"{banca_q}_{mes_q}_{ano_q}_{loc}"
-            df_loc = st.session_state["historico_localidades"].get(chave_loc)
-
-            chave_dias_loc = f"{banca_q}_{loc}"
-            dias_permitidos_loc = st.session_state["dias_permitidos_dict"].get(
-                chave_dias_loc,
-                ["Segunda", "Terça", "Quarta", "Quinta", "Sexta"],
-            )
-
-            for d in dias_sem:
-                dia_semana_str_d = DIAS_SEMANA_OPCOES[d.weekday()]
-                if dia_semana_str_d not in dias_permitidos_loc:
-                    linha.append("-")
-                    continue
-
-                data_str = d.strftime("%d/%m/%Y")
-
-                viagem_ativa = next(
-                    (
-                        v
-                        for v in st.session_state["viagens_registradas"]
-                        if (
-                            v["Banca"] == banca_q
-                            or (
-                                v.get("Apoio Conjunto")
-                                and banca_q in ["Banca Caxias", "Banca Timon"]
-                            )
-                        )
-                        and v["Destino"] == loc
-                        and v["Data Inicio"] <= d <= v["Data Fim"]
-                    ),
-                    None,
-                )
-
-                if viagem_ativa:
-                    linha.append(f"{examinadores_da_banca_na_viagem(viagem_ativa, banca_q)} (Viagem)")
-                elif df_loc is not None:
-                    df_dia_todos = df_loc[df_loc["Data"] == data_str]
-                    eh_feriado_local = (
-                        not df_dia_todos.empty
-                        and (
-                            df_dia_todos["Status"] == "Feriado / Sem Atendimento"
-                        ).any()
-                    )
-                    if eh_feriado_local or d in feriados_oficiais_q:
-                        linha.append("Feriado")
-                        continue
-
-                    df_dia = df_dia_todos[df_dia_todos["Status"] == "Disponível"]
-                    if not df_dia.empty:
-                        qtd_ex = max(df_dia["Exam. M"].max(), df_dia["Exam. T"].max())
-                        linha.append(str(int(qtd_ex)))
-                    else:
-                        linha.append("x")
-                elif d in feriados_oficiais_q:
-                    linha.append("Feriado")
-                else:
-                    linha.append("x")
-            matriz_dados.append(linha)
-
-        linha_total = ["TOTAL EXAMINADORES EM CAMPO"]
-
-        for d in dias_sem:
-            dia_semana_str_d = DIAS_SEMANA_OPCOES[d.weekday()]
-            data_str = d.strftime("%d/%m/%Y")
-
-            total_manha = 0
-            total_tarde = 0
-
-            for loc in locais_banca:
-                chave_dias_loc = f"{banca_q}_{loc}"
-                dias_permitidos_loc = st.session_state["dias_permitidos_dict"].get(
-                    chave_dias_loc,
-                    ["Segunda", "Terça", "Quarta", "Quinta", "Sexta"],
-                )
-                if dia_semana_str_d not in dias_permitidos_loc:
-                    continue
-
-                viagem_manha = next(
-                    (v for v in st.session_state["viagens_registradas"]
-                     if banca_vinculada(v, banca_q)
-                     and v.get("Destino") == loc
-                     and viagem_cobre_periodo(v, d, "Manhã")),
-                    None,
-                )
-                viagem_tarde = next(
-                    (v for v in st.session_state["viagens_registradas"]
-                     if banca_vinculada(v, banca_q)
-                     and v.get("Destino") == loc
-                     and viagem_cobre_periodo(v, d, "Tarde")),
-                    None,
-                )
-
-                chave_loc = f"{banca_q}_{mes_q}_{ano_q}_{loc}"
-                df_loc = st.session_state["historico_localidades"].get(chave_loc)
-
-                if df_loc is not None:
-                    df_dia = df_loc[
-                        (df_loc["Data"] == data_str) & (df_loc["Status"] == "Disponível")
-                    ]
-                    if not df_dia.empty:
-                        if viagem_manha is None:
-                            total_manha += int(df_dia["Exam. M"].max())
-                        if viagem_tarde is None:
-                            total_tarde += int(df_dia["Exam. T"].max())
-
-            equipes_manha = {}
-            equipes_tarde = {}
-            for v in st.session_state["viagens_registradas"]:
-                if not banca_vinculada(v, banca_q):
-                    continue
-                equipe = int(v.get("Numero Banca Itinerante", 0))
-                qtd = examinadores_da_banca_na_viagem(v, banca_q)
-                if qtd <= 0:
-                    continue
-                if viagem_cobre_periodo(v, d, "Manhã"):
-                    equipes_manha[equipe] = max(equipes_manha.get(equipe, 0), qtd)
-                if viagem_cobre_periodo(v, d, "Tarde"):
-                    equipes_tarde[equipe] = max(equipes_tarde.get(equipe, 0), qtd)
-
-            total_manha += sum(equipes_manha.values())
-            total_tarde += sum(equipes_tarde.values())
-
-            soma_dia = max(total_manha, total_tarde)
-            linha_total.append(str(int(soma_dia)))
-
-        matriz_dados.append(linha_total)
-
-        df_semana = pd.DataFrame(
-            matriz_dados,
-            columns=["Localidade"] + [d.strftime("%d/%m - %a") for d in dias_sem],
+    for indice, (_segunda, dias_semana) in enumerate(
+        _agrupar_por_semana(dias_uteis).items(), 1
+    ):
+        rotulo = (
+            f"Semana {indice} ({dias_semana[0].strftime('%d')} a"
+            f" {dias_semana[-1].strftime('%d')} de {mes_nome})"
         )
-        st.dataframe(df_semana, use_container_width=True, hide_index=True)
+        st.markdown(f"#### 📅 {rotulo}")
 
-# --- ABA: GESTÃO DE VIAGENS ITINERANTES ---
-with aba_viagens:
-    st.markdown("### 🚍 Controle de Viagens e Equipes Itinerantes")
-    st.info(
-        "Organize aqui os deslocamentos das bancas para atendimento aos"
-        " municípios do interior. As equipes em viagem serão automaticamente"
-        " somadas ao controle de efetivo diário e aplicadas na montagem de"
-        " calendário."
+        cabecalho, linhas = _montar_matriz_semana(
+            banca, mes_nome, ano, dias_semana, feriados
+        )
+        st.dataframe(
+            pd.DataFrame(linhas, columns=cabecalho),
+            **LARGURA_TOTAL,
+            hide_index=True,
+        )
+
+        equipes = equipes_ativas_no_intervalo(
+            viagens, banca, dias_semana[0], dias_semana[-1]
+        )
+        total_em_viagem = sum(int(e["Examinadores"]) for e in equipes)
+
+        if equipes:
+            st.caption(
+                f"🚍 {len(equipes)} equipe(s) itinerante(s) nesta semana —"
+                f" {total_em_viagem} examinadores em deslocamento."
+            )
+            for equipe in equipes:
+                titulo = (
+                    f"🚍 Banca {int(equipe['Numero']):02d} — Viagem para"
+                    f" {' / '.join(equipe['Destinos'])}"
+                    f" ({int(equipe['Examinadores'])} examinadores)"
+                )
+                with st.expander(titulo, expanded=False):
+                    for trecho in equipe["Trechos"]:
+                        dias_trecho = [
+                            d
+                            for d in dias_efetivos_da_viagem(trecho)
+                            if dias_semana[0] <= d <= dias_semana[-1]
+                        ]
+                        if not dias_trecho:
+                            continue
+                        detalhe_turnos = descricao_turnos(trecho)
+                        st.write(
+                            f"• **{trecho.get('Destino')}** — "
+                            f"{formatar_br(min(dias_trecho))} a"
+                            f" {formatar_br(max(dias_trecho))} — "
+                            f"{trecho.get('Turno', TURNO_INTEGRAL)}"
+                            f" · {examinadores_da_banca_na_viagem(trecho, banca)}"
+                            " examinador(es)"
+                            + (f" · ajustes: {detalhe_turnos}" if detalhe_turnos else "")
+                        )
+                        if trecho.get("Observações"):
+                            st.caption(str(trecho["Observações"]))
+        else:
+            st.caption("Nenhuma equipe itinerante nesta semana.")
+
+        for equipe in equipes:
+            equipe["Observacao"] = descricao_turnos(equipe["Trechos"][0])
+
+        bloco_pdf(
+            chave=f"semana_{banca}_{mes_nome}_{ano}_{indice}",
+            rotulo_gerar=f"📄 Gerar PDF da Semana {indice}",
+            gerador=lambda cab=cabecalho, lin=linhas, eq=equipes, rot=rotulo: (
+                gerar_pdf_semana(cab, lin, eq, banca, mes_nome, ano, rot)
+            ),
+            nome_arquivo=(
+                f"Escala_Semana{indice}_{banca}_{mes_nome}_{ano}.pdf".replace(" ", "_")
+            ),
+            ajuda="Gera o resumo da escala desta semana para impressão.",
+            altura_previa=520,
+        )
+        st.markdown("---")
+
+    st.caption(
+        "Legenda: número = examinadores previstos · **Viagem NN** = equipe"
+        " itinerante (M = só manhã, T = só tarde) · **x** = sem lançamento ·"
+        " **-** = dia fora da grade da localidade."
     )
 
-    v_col1, v_col2 = st.columns([1, 2])
 
-    with v_col1:
-        st.markdown("#### ➕ Cadastrar Nova Viagem")
+# --- Aba: montagem do calendário detalhado ----------------------------------
+def _montar_grade_base(
+    *,
+    banca: str,
+    local: str,
+    ano: int,
+    mes_numero: int,
+    dias_permitidos: list[str],
+    horarios: list[str],
+    feriados: set[datetime.date],
+    padrao_manha: int,
+    padrao_tarde: int,
+) -> tuple[pd.DataFrame, list[str]]:
+    """Gera uma linha por (dia de atendimento × horário ativo)."""
+    viagens = st.session_state["viagens_registradas"]
+    bancas_config = st.session_state["bancas_config"]
 
-        banca_v = st.selectbox(
-            "Banca Responsável:",
-            list(st.session_state["bancas_config"].keys()),
-            key="v_banca",
+    viagens_do_local = [
+        v
+        for v in viagens
+        if banca_vinculada(v, banca) and v.get("Destino") == local
+    ]
+    eh_regional = banca not in ("Banca São Luís", "Banca Imperatriz")
+    eh_sede = local == obter_sede(bancas_config, banca)
+
+    total_dias = calendar.monthrange(ano, mes_numero)[1]
+    registros: list[dict] = []
+    datas_do_mes: list[str] = []
+
+    for numero_dia in range(1, total_dias + 1):
+        data = datetime.date(ano, mes_numero, numero_dia)
+        nome_dia = DIAS_SEMANA_OPCOES[data.weekday()]
+        tem_viagem_no_dia = any(viagem_cobre_dia(v, data) for v in viagens_do_local)
+        if nome_dia not in dias_permitidos and not tem_viagem_no_dia:
+            continue
+
+        data_texto = data.strftime("%d/%m/%Y")
+        if data_texto not in datas_do_mes:
+            datas_do_mes.append(data_texto)
+        eh_feriado = data in feriados
+
+        for horario in horarios:
+            periodo = periodo_do_horario(horario)
+            viagem_no_periodo = next(
+                (v for v in viagens_do_local if viagem_cobre_periodo(v, data, periodo)),
+                None,
+            )
+            banca_viajando = viagens_ativas_no_periodo(viagens, banca, data, periodo)
+
+            if eh_feriado:
+                status, exam_manha, exam_tarde = STATUS_FERIADO, 0, 0
+            elif viagem_no_periodo:
+                efetivo = examinadores_da_banca_na_viagem(viagem_no_periodo, banca)
+                status = STATUS_DISPONIVEL
+                exam_manha = efetivo if periodo == TURNO_MANHA else 0
+                exam_tarde = efetivo if periodo == TURNO_TARDE else 0
+            elif tem_viagem_no_dia:
+                # A equipe está no município, mas não neste turno.
+                status, exam_manha, exam_tarde = STATUS_INDISPONIVEL, 0, 0
+            elif eh_regional and eh_sede and banca_viajando:
+                status, exam_manha, exam_tarde = STATUS_INDISPONIVEL, 0, 0
+            elif nome_dia not in dias_permitidos:
+                status, exam_manha, exam_tarde = STATUS_INDISPONIVEL, 0, 0
+            else:
+                status = STATUS_DISPONIVEL
+                exam_manha = padrao_manha if periodo == TURNO_MANHA else 0
+                exam_tarde = padrao_tarde if periodo == TURNO_TARDE else 0
+
+            registro = {
+                "Data": data_texto,
+                "Dia da Semana": nome_dia,
+                "Status": status,
+                "Exam. M": exam_manha if status == STATUS_DISPONIVEL else 0,
+                "Exam. T": exam_tarde if status == STATUS_DISPONIVEL else 0,
+                "Horário": horario,
+            }
+            for coluna in COLS_VAGAS:
+                registro[coluna] = 0
+            registro["Total"] = 0
+            registros.append(registro)
+
+    colunas = (
+        ["Data", "Dia da Semana", "Status", "Exam. M", "Exam. T", "Horário"]
+        + COLS_VAGAS
+        + ["Total"]
+    )
+    return pd.DataFrame(registros, columns=colunas), datas_do_mes
+
+
+def _mesclar_com_historico(df_base: pd.DataFrame, chave: str) -> pd.DataFrame:
+    """Preserva os lançamentos já feitos, sem deixar escapar bloqueios novos."""
+    historico = st.session_state["historico_localidades"]
+    if chave not in historico or df_base.empty:
+        return df_base.copy()
+
+    df_antigo = historico[chave]
+    if df_antigo.empty:
+        return df_base.copy()
+
+    # Sem isto, um horário repetido faz o .loc devolver DataFrame em vez de Series.
+    df_antigo = df_antigo.drop_duplicates(subset=["Data", "Horário"], keep="last")
+    indexado = df_antigo.set_index(["Data", "Horário"])
+
+    linhas = []
+    for registro in df_base.to_dict(orient="records"):
+        chave_linha = (registro["Data"], registro["Horário"])
+        if registro["Status"] in STATUS_BLOQUEADOS or chave_linha not in indexado.index:
+            linhas.append(registro)
+            continue
+        antigo = indexado.loc[chave_linha]
+        registro["Status"] = antigo.get("Status", registro["Status"])
+        registro["Exam. M"] = _num(antigo.get("Exam. M", 0))
+        registro["Exam. T"] = _num(antigo.get("Exam. T", 0))
+        for coluna in COLS_VAGAS:
+            registro[coluna] = _num(antigo.get(coluna, 0))
+        linhas.append(registro)
+    return pd.DataFrame(linhas, columns=df_base.columns)
+
+
+def _calendario_visual(
+    banca: str,
+    local: str,
+    ano: int,
+    mes_numero: int,
+    feriados: set[datetime.date],
+    chave: str,
+) -> None:
+    st.markdown("### 📅 Visualização em Calendário Interativo")
+    if not TEM_COMPONENTE_CALENDARIO:
+        st.info(
+            "💡 Para arrastar viagens diretamente na tela, adicione"
+            " `streamlit-calendar` ao `requirements.txt`."
         )
+        return
 
-        numeros_existentes_banca_v = sorted(
+    eventos = []
+    for viagem in st.session_state["viagens_registradas"]:
+        if not banca_vinculada(viagem, banca):
+            continue
+        inicio = para_data(viagem["Data Inicio"])
+        fim = para_data(viagem["Data Fim"])
+        if not inicio or not fim:
+            continue
+        eventos.append(
             {
-                v["Numero Banca Itinerante"]
-                for v in st.session_state["viagens_registradas"]
-                if v["Banca"] == banca_v
+                # O id viaja no evento: dispensa extrair o destino do título.
+                "id": str(viagem.get("id") or ""),
+                "title": (
+                    f"🚍 {viagem['Destino']}"
+                    f" ({examinadores_da_banca_na_viagem(viagem, banca)} Ex.)"
+                ),
+                "start": inicio.isoformat(),
+                "end": (fim + datetime.timedelta(days=1)).isoformat(),
+                "color": COR_SECUNDARIA if viagem["Destino"] == local else COR_NEUTRA,
+                "allDay": True,
             }
         )
 
-        proximo_numero_banca_v = (
-            max(numeros_existentes_banca_v) + 1 if numeros_existentes_banca_v else 1
-        )
-
-        opcoes_time_itinerante = [
-            f"➕ Nova banca itinerante (Banca {proximo_numero_banca_v:02d})"
-        ] + [
-            f"🔁 Continuar Banca {n:02d} já cadastrada"
-            for n in numeros_existentes_banca_v
-        ]
-        escolha_time_itinerante = st.selectbox(
-            "Esta viagem pertence a:",
-            opcoes_time_itinerante,
-            key="v_time_itinerante",
-            help=(
-                "Se a mesma equipe vai atender mais de um município em"
-                " sequência na mesma viagem, cadastre o primeiro trecho como"
-                " \"Nova banca itinerante\" e os seguintes como"
-                " \"Continuar\" essa mesma banca."
-            ),
-        )
-
-        if escolha_time_itinerante.startswith("➕"):
-            numero_banca_itinerante_v = proximo_numero_banca_v
-            examinadores_padrao_v = int(st.session_state["limite_fora_sede_bancas"].get(banca_v, st.session_state["capacidade_bancas"].get(banca_v, 1)))
-        else:
-            match_banca_it = re.search(r"Banca\s+(\d+)", escolha_time_itinerante)
-            if not match_banca_it:
-                st.error("Não foi possível identificar o número da banca itinerante selecionada.")
-                st.stop()
-            numero_banca_itinerante_v = int(match_banca_it.group(1))
-            trecho_existente = next(
-                (
-                    v
-                    for v in st.session_state["viagens_registradas"]
-                    if v["Banca"] == banca_v
-                    and v["Numero Banca Itinerante"] == numero_banca_itinerante_v
-                ),
-                None,
-            )
-            examinadores_padrao_v = (
-                trecho_existente.get("Examinadores", 1) if trecho_existente else int(st.session_state["limite_fora_sede_bancas"].get(banca_v, 1))
-            )
-
-        apoio_conjunto = False
-        if banca_v in ["Banca Caxias", "Banca Timon"]:
-            apoio_conjunto = st.checkbox(
-                "🤝 Viagem Conjunta (Caxias + Timon)",
-                help=(
-                    "Marque se as equipes de Caxias e Timon farão esta viagem em"
-                    " parceria."
-                ),
-            )
-
-        sede_banca_v = obter_sede(banca_v)
-        locais_destino = [
-            l
-            for l in st.session_state["bancas_config"][banca_v]
-            if l != sede_banca_v
-        ]
-        if not locais_destino:
-            locais_destino = st.session_state["bancas_config"][banca_v]
-
-        destino_v = st.selectbox(
-            "Município de Destino:", locais_destino, key="v_dest"
-        )
-
-        d_inicio = st.date_input(
-            "Data de Início da Viagem:",
-            datetime.date(2026, 11, 9),
-            format="DD/MM/YYYY",
-        )
-        d_fim = st.date_input(
-            "Data de Término da Viagem:",
-            datetime.date(2026, 11, 13),
-            format="DD/MM/YYYY",
-        )
-        turno_v = st.selectbox(
-            "Período de atendimento:",
-            ["Dia inteiro", "Manhã", "Tarde"],
-            help=("Use Manhã/Tarde quando a mesma equipe atender municípios diferentes no mesmo dia."),
-        )
-
-        if apoio_conjunto:
-            col_c, col_t = st.columns(2)
-            with col_c:
-                num_exam_caxias = st.number_input("Examinadores — Caxias:", min_value=0, max_value=4, value=min(4, examinadores_padrao_v), step=1)
-            with col_t:
-                num_exam_timon = st.number_input("Examinadores — Timon:", min_value=0, max_value=4, value=min(4, examinadores_padrao_v), step=1)
-            num_exam_v = int(num_exam_caxias if banca_v == "Banca Caxias" else num_exam_timon)
-        else:
-            num_exam_v = st.number_input(
-                "Nº de Examinadores Deslocados:",
-                min_value=1,
-                max_value=50,
-                value=max(1, min(50, examinadores_padrao_v)),
-            )
-        obs_v = st.text_input(
-            "Observações / Portaria:", placeholder="Ex: Portaria nº 123/2026"
-        )
-
-        controle_capacidade_ativo = st.checkbox(
-            "Ativar controle automático de capacidade/disponibilidade",
-            value=bool(st.session_state.get("controle_capacidade_ativo", False)),
-            key="controle_capacidade_ativo",
-            help=(
-                "Desativado: permite cadastrar viagens sem bloqueio por capacidade."
-            ),
-        )
-
-        with st.expander("⚙️ Capacidade e disponibilidade semanal", expanded=False):
-            st.caption("Ajuste manualmente os limites operacionais.")
-            cap_cols = st.columns(2)
-            for idx_cap, bcap in enumerate(st.session_state["bancas_config"].keys()):
-                with cap_cols[idx_cap % 2]:
-                    cap = st.number_input(f"{bcap} — efetivo total", min_value=0, max_value=100, value=int(st.session_state["capacidade_bancas"].get(bcap, 0)), key=f"cap_{bcap}")
-                    lim = st.number_input(f"{bcap} — máximo fora da sede", min_value=0, max_value=100, value=int(st.session_state["limite_fora_sede_bancas"].get(bcap, 0)), key=f"lim_{bcap}")
-                    st.session_state["capacidade_bancas"][bcap] = int(cap)
-                    st.session_state["limite_fora_sede_bancas"][bcap] = int(lim)
-            st.markdown("**Disponibilidade semanal — São Luís e Imperatriz**")
-            semana_ref = st.date_input("Semana de referência (qualquer dia):", datetime.date.today(), key="semana_ref")
-            segunda_ref = semana_ref - datetime.timedelta(days=semana_ref.weekday())
-            cols_disp = st.columns(2)
-            for j, bdisp in enumerate(["Banca São Luís", "Banca Imperatriz"]):
-                with cols_disp[j]:
-                    chave_disp = f"{bdisp}|{segunda_ref.isoformat()}"
-                    valor_disp = st.number_input(f"{bdisp} — disponível na semana de {segunda_ref.strftime('%d/%m/%Y')}", min_value=0, max_value=100, value=int(st.session_state["disponibilidade_semanal"].get(chave_disp, st.session_state["capacidade_bancas"].get(bdisp, 0))), key=f"disp_{bdisp}_{segunda_ref.isoformat()}")
-                    st.session_state["disponibilidade_semanal"][chave_disp] = int(valor_disp)
-
-        if st.button("💾 Registrar Viagem"):
-            erros = []
-            if d_fim < d_inicio:
-                erros.append("A data final não pode ser anterior à data de início.")
-            datas_feriado_viagem = []
-            chave_fer = f"feriados_{banca_v}_{destino_v}"
-            texto_feriados = st.session_state.get("feriados_locais_dict", {}).get(chave_fer, "")
-            for linha_feriado in str(texto_feriados).splitlines():
-                dt_fer = extrair_data_feriado(linha_feriado.strip(), d_inicio.year)
-                if dt_fer and d_inicio <= dt_fer <= d_fim:
-                    datas_feriado_viagem.append(dt_fer)
-            if datas_feriado_viagem:
-                erros.append("A viagem atravessa feriado(s) municipal(is): " + ", ".join(d.strftime("%d/%m/%Y") for d in sorted(set(datas_feriado_viagem))))
-
-            conflitos = conflitos_de_horario_rota(
-                banca_v, destino_v, d_inicio, d_fim, turno_v, numero_banca_itinerante_v, apoio_conjunto
-            )
-            if conflitos:
-                erros.append("Existe outro trecho da mesma banca itinerante no mesmo período dentro do intervalo informado.")
-
-            bancas_validar = [banca_v]
-            if apoio_conjunto:
-                bancas_validar = ["Banca Caxias", "Banca Timon"]
-            data_cursor = d_inicio
-            while controle_capacidade_ativo and data_cursor <= d_fim:
-                if data_cursor.weekday() < 5:
-                    for bcap in bancas_validar:
-                        qtd_nova = int(num_exam_caxias if bcap == "Banca Caxias" and apoio_conjunto else num_exam_timon if bcap == "Banca Timon" and apoio_conjunto else num_exam_v)
-                        picos = []
-                        for periodo_cap in ["Manhã", "Tarde"]:
-                            por_equipe = {}
-                            for v_exist in st.session_state["viagens_registradas"]:
-                                if banca_vinculada(v_exist, bcap) and viagem_cobre_periodo(v_exist, data_cursor, periodo_cap):
-                                    equipe = int(v_exist.get("Numero Banca Itinerante", 0))
-                                    por_equipe[equipe] = max(por_equipe.get(equipe, 0), examinadores_da_banca_na_viagem(v_exist, bcap))
-                            equipe_nova = int(numero_banca_itinerante_v)
-                            if turno_v == "Dia inteiro" or turno_v == periodo_cap:
-                                por_equipe[equipe_nova] = max(por_equipe.get(equipe_nova, 0), qtd_nova)
-                            picos.append(sum(por_equipe.values()))
-                        pico_fora = max(picos or [0])
-                        limite = int(st.session_state["limite_fora_sede_bancas"].get(bcap, st.session_state["capacidade_bancas"].get(bcap, 0)))
-                        disponivel_semana = disponibilidade_semanal_banca(bcap, data_cursor)
-                        teto = min(limite, disponivel_semana)
-                        if pico_fora > teto:
-                            erros.append(f"{bcap}: deslocamento simultâneo de {pico_fora} examinadores excede o limite manual de {teto} na semana de {data_cursor.strftime('%d/%m/%Y')}.")
-                            break
-                data_cursor += datetime.timedelta(days=1)
-                if erros and any("capacidade semanal" in e for e in erros):
-                    break
-
-            if erros:
-                for erro in erros:
-                    st.error(erro)
-                if datas_feriado_viagem:
-                    st.warning("O feriado foi tratado como alerta operacional.")
-            else:
-                registro = {
-                    "Banca": banca_v,
-                    "Numero Banca Itinerante": numero_banca_itinerante_v,
-                    "Apoio Conjunto": apoio_conjunto,
-                    "Destino": destino_v,
-                    "Data Inicio": d_inicio,
-                    "Data Fim": d_fim,
-                    "Turno": turno_v,
-                    "Examinadores": int(num_exam_v),
-                    "Observações": obs_v,
+    for feriado in feriados:
+        if feriado.month == mes_numero and feriado.year == ano:
+            eventos.append(
+                {
+                    "id": "",
+                    "title": "🔴 Feriado / Sem Atendimento",
+                    "start": feriado.isoformat(),
+                    "color": COR_ALERTA,
+                    "allDay": True,
                 }
-                if apoio_conjunto:
-                    registro["Examinadores Caxias"] = int(num_exam_caxias)
-                    registro["Examinadores Timon"] = int(num_exam_timon)
-                    registro["Examinadores"] = int(num_exam_caxias + num_exam_timon)
-                st.session_state["viagens_registradas"].append(registro)
-                st.success(
-                    f"Trecho para **{destino_v}** registrado na Banca {numero_banca_itinerante_v:02d}. "
-                    f"Período: {turno_v}."
-                )
-
-with v_col2:
-    st.markdown("### 📋 CRONOGRAMA DE VIAGENS PROGRAMADAS")
-
-    if "viagens_registradas" not in st.session_state:
-        st.session_state["viagens_registradas"] = []
-
-    if not st.session_state["viagens_registradas"]:
-        st.warning("Nenhuma viagem cadastrada até o momento.")
-    else:
-        # Importação segura para evitar o TypeError na linha 1368
-        import datetime as dt
-
-        # 1. Padronização rigorosa dos tipos de data
-        for v in st.session_state["viagens_registradas"]:
-            if isinstance(v.get("Data Inicio"), str):
-                v["Data Inicio"] = dt.datetime.strptime(v["Data Inicio"][:10], "%Y-%m-%d").date()
-            if isinstance(v.get("Data Fim"), str):
-                v["Data Fim"] = dt.datetime.strptime(v["Data Fim"][:10], "%Y-%m-%d").date()
-
-        # 2. Agrupamento por Banca Principal (ex: Banca São Luís, Banca Imperatriz)
-        bancas_principais = sorted(list({v.get("Banca", "Banca São Luís") for v in st.session_state["viagens_registradas"]}))
-
-        for b_principal in bancas_principais:
-            mes_txt = st.session_state.get('mes_selecionado', 'NOVEMBRO').upper()
-            
-            # Cabeçalho AZUL
-            st.markdown(
-                f"""
-                <div style="background-color: #2B579A; color: #FFFFFF; padding: 8px; font-weight: bold; text-align: center; border-radius: 4px; font-size: 14px; text-transform: uppercase; margin-top: 15px; margin-bottom: 10px;">
-                    MÊS DE {mes_txt} — {b_principal.upper()}
-                </div>
-                """,
-                unsafe_allow_html=True
             )
 
-            viagens_da_banca = [v for v in st.session_state["viagens_registradas"] if v.get("Banca") == b_principal]
+    opcoes = {
+        "editable": True,
+        "selectable": False,
+        "headerToolbar": {
+            "left": "prev,next today",
+            "center": "title",
+            "right": "dayGridMonth,timeGridWeek",
+        },
+        "initialDate": f"{ano}-{mes_numero:02d}-01",
+        "locale": "pt-br",
+    }
 
-            # 3. Agrupamento por Número da Banca Itinerante (ex: Banca 01, Banca 04)
-            numeros_itinerantes = sorted(list({int(v.get("Numero Banca Itinerante", 1)) for v in viagens_da_banca}))
-
-            for num_it in numeros_itinerantes:
-                # Agrupa todos os trechos pertencentes a este mesmo número de banca itinerante
-                grupo_trechos = [v for v in viagens_da_banca if int(v.get("Numero Banca Itinerante", 1)) == num_it]
-                grupo_trechos.sort(key=lambda x: x["Data Inicio"])
-
-                # Une os nomes dos municípios (ex: "Tutóia e Barreirinhas")
-                destinos_unicos = []
-                for t in grupo_trechos:
-                    m = t.get("Destino", "")
-                    if m and m not in destinos_unicos:
-                        destinos_unicos.append(m)
-                
-                nome_destinos = " e ".join(destinos_unicos) if destinos_unicos else "Destino não informado"
-                
-                # Pega dados de referência do primeiro trecho do grupo
-                ref = grupo_trechos[0]
-
-                st.markdown(f"**📍 {nome_destinos}** *(Banca Itinerante {num_it:02d})*")
-                
-                col_dt1, col_dt2, col_bnc, col_ex = st.columns([2, 2, 1.5, 1.5])
-                
-                nova_dt_in = col_dt1.date_input("Início", value=ref["Data Inicio"], format="DD/MM/YYYY", key=f"grp_in_{b_principal}_{num_it}")
-                nova_dt_fim = col_dt2.date_input("Término", value=ref["Data Fim"], format="DD/MM/YYYY", key=f"grp_fim_{b_principal}_{num_it}")
-                novo_num_banca = col_bnc.number_input("Nº Banca", value=num_it, min_value=1, key=f"grp_num_{b_principal}_{num_it}")
-                novos_ex = col_ex.number_input("Examinadores", value=int(ref.get("Examinadores", 1)), min_value=1, key=f"grp_ex_{b_principal}_{num_it}")
-
-                # Aplica as alterações a todos os trechos da mesma banca agregada
-                if (nova_dt_in != ref["Data Inicio"] or nova_dt_fim != ref["Data Fim"] or 
-                    novo_num_banca != num_it or novos_ex != ref.get("Examinadores")):
-                    
-                    for t in grupo_trechos:
-                        t["Data Inicio"] = nova_dt_in
-                        t["Data Fim"] = nova_dt_fim
-                        t["Numero Banca Itinerante"] = novo_num_banca
-                        t["Examinadores"] = novos_ex
-                        t["Período"] = f"{nova_dt_in.strftime('%d/%m/%Y')} até {nova_dt_fim.strftime('%d/%m/%Y')}"
-                    st.rerun()
-
-                # Botão para remover todo o grupo dessa banca itinerante
-                col_del, _ = st.columns([3, 7])
-                if col_del.button(f"🗑️ Remover Banca {num_it:02d}", key=f"del_grp_{b_principal}_{num_it}"):
-                    st.session_state["viagens_registradas"] = [
-                        v for v in st.session_state["viagens_registradas"] 
-                        if not (v.get("Banca") == b_principal and int(v.get("Numero Banca Itinerante", 1)) == num_it)
-                    ]
-                    st.rerun()
-
-                st.markdown("---")
-
-# --- ABA: MONTAR CALENDÁRIO ---
-with aba_cal:
-    st.sidebar.header("⚙️ Parâmetros do Calendário")
-
-    banca_sel = st.sidebar.selectbox(
-        "Banca Principal:", list(st.session_state["bancas_config"].keys())
+    retorno = componente_calendario(
+        events=eventos, options=opcoes, key=f"cal_visual_{chave}"
     )
-    locais_disp = st.session_state["bancas_config"][banca_sel]
-    local_sel = st.sidebar.selectbox("Local de Atendimento:", locais_disp)
+    alteracao = (retorno or {}).get("eventChange")
+    if not alteracao:
+        return
 
-    col_ano, col_mes = st.sidebar.columns(2)
-    with col_ano:
-        ano_sel = st.sidebar.selectbox("Ano:", ANOS_LISTA, index=0)
-    with col_mes:
-        mes_nome = st.sidebar.selectbox(
-            "Mês:", MESES_LISTA, index=10
+    evento = (alteracao or {}).get("event") or {}
+    id_viagem = evento.get("id")
+    if not id_viagem:
+        return
+    try:
+        novo_inicio = datetime.date.fromisoformat(str(evento["start"])[:10])
+        novo_fim = datetime.date.fromisoformat(
+            str(evento["end"])[:10]
+        ) - datetime.timedelta(days=1)
+    except (KeyError, TypeError, ValueError):
+        LOG.warning("Evento de calendário com datas ilegíveis: %r", evento)
+        return
+    if novo_fim < novo_inicio:
+        novo_fim = novo_inicio
+
+    for viagem in st.session_state["viagens_registradas"]:
+        if str(viagem.get("id")) == str(id_viagem):
+            viagem["Data Inicio"] = novo_inicio
+            viagem["Data Fim"] = novo_fim
+            # Ajustes de turno que caíram fora do novo intervalo perdem sentido.
+            viagem["Turnos Por Data"] = {
+                iso: turno
+                for iso, turno in (viagem.get("Turnos Por Data") or {}).items()
+                if (d := para_data(iso)) and novo_inicio <= d <= novo_fim
+            }
+            salvar_viagens(st.session_state["viagens_registradas"])
+            st.toast(f"Viagem para {viagem['Destino']} reagendada.")
+            st.rerun()
+
+
+def _monitor_efetivo(
+    banca: str, mes_nome: str, ano: int, datas_do_mes: list[str], efetivo_maximo: int
+) -> None:
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("🔍 Consulta de Efetivo por Data")
+    if not datas_do_mes:
+        st.sidebar.info("Nenhuma data de atendimento neste mês.")
+        return
+
+    data_consulta = st.sidebar.selectbox(
+        "Escolha a Data para checar o total:", datas_do_mes, key="cal_data_consulta"
+    )
+    data = para_data(data_consulta)
+    if not data:
+        return
+
+    viagens = st.session_state["viagens_registradas"]
+    detalhes: list[dict] = []
+    total_manha = 0
+    total_tarde = 0
+
+    for local, df_local in dados_da_banca_no_mes(banca, mes_nome, ano).items():
+        do_dia = df_local[
+            (df_local["Data"] == data_consulta)
+            & (df_local["Status"] == STATUS_DISPONIVEL)
+        ]
+        if do_dia.empty:
+            continue
+        manha = (
+            0
+            if viagem_do_local(viagens, banca, local, data, TURNO_MANHA)
+            else _num(do_dia["Exam. M"].max())
         )
-        mes_num = MESES_LISTA.index(mes_nome) + 1
+        tarde = (
+            0
+            if viagem_do_local(viagens, banca, local, data, TURNO_TARDE)
+            else _num(do_dia["Exam. T"].max())
+        )
+        total_manha += manha
+        total_tarde += tarde
+        if manha or tarde:
+            detalhes.append({"Localidade": local, "Manhã": manha, "Tarde": tarde})
+
+    equipes = equipes_em_viagem(viagens, banca, data)
+    total_manha += sum(equipes[TURNO_MANHA].values())
+    total_tarde += sum(equipes[TURNO_TARDE].values())
+    for equipe in sorted(set(equipes[TURNO_MANHA]) | set(equipes[TURNO_TARDE])):
+        detalhes.append(
+            {
+                "Localidade": f"Banca itinerante {equipe:02d} (Viagem)",
+                "Manhã": equipes[TURNO_MANHA].get(equipe, 0),
+                "Tarde": equipes[TURNO_TARDE].get(equipe, 0),
+            }
+        )
+
+    pico = pico_diario(total_manha, total_tarde)
+    st.sidebar.markdown(f"**Escala do Dia:** `{data_consulta}`")
+    st.sidebar.metric("Efetivo Usado no Dia", f"{pico} / {efetivo_maximo}")
+    st.sidebar.metric("Saldo Restante", efetivo_maximo - pico)
+    if pico > efetivo_maximo:
+        st.sidebar.error(
+            f"⚠️ **ESTOURO DE EFETIVO!** Excesso de {pico - efetivo_maximo}"
+            " examinadores."
+        )
+    if detalhes:
+        st.sidebar.markdown("**Distribuição por Localidade nesta Data:**")
+        st.sidebar.dataframe(
+            pd.DataFrame(detalhes), **LARGURA_TOTAL, hide_index=True
+        )
+    else:
+        st.sidebar.info("Sem exames ou viagens nesta data.")
+
+
+def _pico_do_mes(banca: str, mes_nome: str, ano: int, mes_numero: int) -> int:
+    totais: dict[str, dict[str, int]] = {}
+    viagens = st.session_state["viagens_registradas"]
+
+    for local, df_local in dados_da_banca_no_mes(banca, mes_nome, ano).items():
+        disponiveis = df_local[df_local["Status"] == STATUS_DISPONIVEL]
+        if disponiveis.empty:
+            continue
+        for data_texto, grupo in disponiveis.groupby("Data"):
+            data = para_data(data_texto)
+            if not data:
+                continue
+            acumulado = totais.setdefault(data_texto, {"M": 0, "T": 0})
+            if not viagem_do_local(viagens, banca, local, data, TURNO_MANHA):
+                acumulado["M"] += _num(grupo["Exam. M"].max())
+            if not viagem_do_local(viagens, banca, local, data, TURNO_TARDE):
+                acumulado["T"] += _num(grupo["Exam. T"].max())
+
+    for numero_dia in range(1, calendar.monthrange(ano, mes_numero)[1] + 1):
+        data = datetime.date(ano, mes_numero, numero_dia)
+        manha, tarde = efetivo_em_viagem(viagens, banca, data)
+        if manha or tarde:
+            acumulado = totais.setdefault(data.strftime("%d/%m/%Y"), {"M": 0, "T": 0})
+            acumulado["M"] += manha
+            acumulado["T"] += tarde
+
+    if not totais:
+        return 0
+    return max(pico_diario(v["M"], v["T"]) for v in totais.values())
+
+
+def aba_calendario() -> None:
+    bancas_config = st.session_state["bancas_config"]
+    if not bancas_config:
+        st.warning("Cadastre uma banca na aba de Gestão de Localidades.")
+        return
+
+    st.sidebar.header("⚙️ Parâmetros do Calendário")
+    banca = st.sidebar.selectbox(
+        "Banca Principal:", list(bancas_config.keys()), key="cal_banca"
+    )
+    localidades = bancas_config.get(banca, [])
+    if not localidades:
+        st.warning(f"A banca **{banca}** ainda não possui localidades cadastradas.")
+        return
+    local = st.sidebar.selectbox("Local de Atendimento:", localidades, key="cal_local")
+
+    ano = st.sidebar.selectbox("Ano:", anos_disponiveis(), index=0, key="cal_ano")
+    mes_nome = st.sidebar.selectbox(
+        "Mês:", MESES_LISTA, index=indice_mes_atual(), key="cal_mes"
+    )
+    mes_numero = numero_do_mes(mes_nome)
 
     st.sidebar.markdown("---")
     st.sidebar.subheader("🛡️ Efetivo Diário da Banca")
-    efetivo_diario_banca = st.sidebar.number_input(
-        f"Efetivo Máximo Diário ({banca_sel}):",
+    efetivo_maximo = st.sidebar.number_input(
+        f"Efetivo Máximo Diário ({banca}):",
         min_value=1,
         max_value=200,
-        value=30,
+        value=int(st.session_state["capacidade_bancas"].get(banca, 30)) or 30,
+        key="cal_efetivo",
     )
 
     st.sidebar.subheader("📅 Dias de Atendimento na Semana")
-    dias_semana_opcoes = DIAS_SEMANA_OPCOES
+    chave_loc = chave_local(banca, local)
     dias_permitidos = st.sidebar.multiselect(
         "Selecione os dias de exame desta localidade:",
-        options=dias_semana_opcoes,
-        default=["Segunda", "Terça", "Quarta", "Quinta", "Sexta"],
+        options=DIAS_SEMANA_OPCOES,
+        default=st.session_state["dias_permitidos_dict"].get(
+            chave_loc, DIAS_UTEIS_PADRAO
+        ),
+        key=f"cal_dias_{chave_loc}",
     )
+    st.session_state["dias_permitidos_dict"][chave_loc] = dias_permitidos
+    salvar_dias_permitidos(st.session_state["dias_permitidos_dict"])
 
-    st.session_state["dias_permitidos_dict"][f"{banca_sel}_{local_sel}"] = (
-        dias_permitidos
+    st.sidebar.subheader("👨‍⚖️ Sugestão Inicial de Examinadores")
+    padrao_manha = st.sidebar.number_input(
+        "Padrão Inicial Manhã:", min_value=0, max_value=50, value=4, key="cal_pad_m"
     )
-
-    st.sidebar.subheader("👨‍⚖️ SUGESTÃO INICIAL DE EXAMINADORES")
-    def_ex_m = st.sidebar.number_input(
-        "Padrão Inicial Manhã:", min_value=0, max_value=50, value=4
-    )
-    def_ex_t = st.sidebar.number_input(
-        "Padrão Inicial Tarde:", min_value=0, max_value=50, value=4
+    padrao_tarde = st.sidebar.number_input(
+        "Padrão Inicial Tarde:", min_value=0, max_value=50, value=4, key="cal_pad_t"
     )
 
     st.sidebar.subheader("🏙️ Feriados Municipais / Locais")
-    chave_feriado_loc = f"feriados_{banca_sel}_{local_sel}"
-    val_padrao = st.session_state["feriados_locais_dict"].get(
-        chave_feriado_loc, ""
-    )
-
-    feriados_txt = st.sidebar.text_area(
+    texto_feriados = st.sidebar.text_area(
         "Digite um por linha (Ex: DD/MM - Motivo):",
-        value=val_padrao,
-        help="Digite datas no formato DD/MM ou DD/MM/AAAA",
-        key=f"txt_{chave_feriado_loc}",
+        value=st.session_state["feriados_locais_dict"].get(chave_loc, ""),
+        help="Formatos aceitos: DD/MM, DD/MM/AAAA ou AAAA-MM-DD",
+        key=f"cal_feriados_{chave_loc}",
     )
-    st.session_state["feriados_locais_dict"][chave_feriado_loc] = feriados_txt
+    st.session_state["feriados_locais_dict"][chave_loc] = texto_feriados
+    salvar_feriados_locais(st.session_state["feriados_locais_dict"])
 
-    try:
-        feriados_oficiais = holidays.Brazil(subdiv="MA", years=ano_sel)
-    except TypeError:
-        feriados_oficiais = holidays.BR(state="MA", years=ano_sel)
-    datas_feriados_set = set(feriados_oficiais.keys())
+    feriados = set(feriados_estaduais(ano))
+    feriados |= datas_de_feriado_do_texto(texto_feriados, ano)
 
-    if feriados_txt.strip():
-        for l in feriados_txt.strip().split("\n"):
-            dt_parse = extrair_data_feriado(l, ano_sel)
-            if dt_parse:
-                datas_feriados_set.add(dt_parse)
-
-    num_dias = calendar.monthrange(ano_sel, mes_num)[1]
-    registros = []
-    cols_vagas = [
-        "Cat A",
-        "Cat B",
-        "Cat C",
-        "Cat D",
-        "Cat E",
-        "PCD A",
-        "PCD B",
-        "PCD C",
-        "PCD D",
-        "PCD E",
+    horarios_ativos = [
+        h
+        for h in st.session_state["lista_horarios"]
+        if h not in st.session_state["horarios_inativos"]
     ]
-    datas_disponiveis_mes = []
-
-    is_banca_regional = banca_sel not in ["Banca São Luís", "Banca Imperatriz"]
-    is_sede = local_sel == obter_sede(banca_sel)
-
-    viagens_da_localidade = [
-        v
-        for v in st.session_state["viagens_registradas"]
-        if (
-            v["Banca"] == banca_sel
-            or (
-                v.get("Apoio Conjunto")
-                and banca_sel in ["Banca Caxias", "Banca Timon"]
-            )
+    if not horarios_ativos:
+        st.warning(
+            "Não há horários ativos. Cadastre ou reative horários na aba"
+            " **Horários & Turmas**."
         )
-        and v["Destino"] == local_sel
-    ]
-    tem_viagem_para_local = len(viagens_da_localidade) > 0
+        return
+    if not dias_permitidos:
+        st.warning("Selecione ao menos um dia da semana na barra lateral.")
+        return
 
-    for dia in range(1, num_dias + 1):
-        data_at = datetime.date(ano_sel, mes_num, dia)
-        w_day = data_at.weekday()
-        dia_semana_str = dias_semana_opcoes[w_day]
+    df_base, datas_do_mes = _montar_grade_base(
+        banca=banca,
+        local=local,
+        ano=ano,
+        mes_numero=mes_numero,
+        dias_permitidos=dias_permitidos,
+        horarios=horarios_ativos,
+        feriados=feriados,
+        padrao_manha=padrao_manha,
+        padrao_tarde=padrao_tarde,
+    )
 
-        if dia_semana_str not in dias_permitidos:
-            continue
+    chave = chave_historico(banca, mes_nome, ano, local)
+    df_completo = _mesclar_com_historico(df_base, chave)
 
-        data_fmt = data_at.strftime("%d/%m/%Y")
-        if data_fmt not in datas_disponiveis_mes:
-            datas_disponiveis_mes.append(data_fmt)
-
-        is_feriado = data_at in datas_feriados_set
-
-        viagem_local_data = None
-        banca_em_viagem_geral = False
-
-        for h in st.session_state["lista_horarios"]:
-            periodo_h = periodo_do_horario(h)
-            viagem_h = next(
-                (v for v in viagens_da_localidade if viagem_cobre_periodo(v, data_at, periodo_h)),
-                None,
-            )
-            viagem_banca_h = viagens_ativas_no_periodo(banca_sel, data_at, periodo_h)
-            if is_feriado:
-                status_ini_linha = "Feriado / Sem Atendimento"
-                ex_m_linha = ex_t_linha = 0
-            elif viagem_h:
-                ex_viagem = examinadores_da_banca_na_viagem(viagem_h, banca_sel)
-                status_ini_linha = "Disponível"
-                ex_m_linha = ex_viagem if periodo_h == "Manhã" else 0
-                ex_t_linha = ex_viagem if periodo_h == "Tarde" else 0
-            elif tem_viagem_para_local:
-                status_ini_linha = "Indisponível"
-                ex_m_linha = ex_t_linha = 0
-            elif is_banca_regional and is_sede and viagem_banca_h:
-                status_ini_linha = "Indisponível"
-                ex_m_linha = ex_t_linha = 0
-            else:
-                status_ini_linha = "Disponível"
-                ex_m_linha = def_ex_m if periodo_h == "Manhã" else 0
-                ex_t_linha = def_ex_t if periodo_h == "Tarde" else 0
-            row = {
-                "Data": data_fmt,
-                "Dia da Semana": dia_semana_str,
-                "Status": status_ini_linha,
-                "Exam. M": ex_m_linha if status_ini_linha == "Disponível" else 0,
-                "Exam. T": ex_t_linha if status_ini_linha == "Disponível" else 0,
-                "Horário": h,
-            }
-            for c in cols_vagas:
-                row[c] = 0
-            registros.append(row)
-
-    df_base = pd.DataFrame(registros)
-
-    chave_guardar = f"{banca_sel}_{mes_nome}_{ano_sel}_{local_sel}"
-
-    if chave_guardar in st.session_state["historico_localidades"]:
-        df_antigo = st.session_state["historico_localidades"][chave_guardar]
-        df_antigo_idx = df_antigo.set_index(["Data", "Horário"])
-
-        registros_merged = []
-        for _, row_base in df_base.iterrows():
-            chave_linha = (row_base["Data"], row_base["Horário"])
-            if chave_linha in df_antigo_idx.index:
-                row_antiga = df_antigo_idx.loc[chave_linha]
-                status_estrutural_bloqueado = row_base["Status"] in [
-                    "Feriado / Sem Atendimento",
-                    "Indisponível",
-                ]
-                if status_estrutural_bloqueado:
-                    registros_merged.append(row_base.to_dict())
-                else:
-                    row_final = row_base.to_dict()
-                    row_final["Status"] = row_antiga["Status"]
-                    row_final["Exam. M"] = row_antiga["Exam. M"]
-                    row_final["Exam. T"] = row_antiga["Exam. T"]
-                    for c in cols_vagas:
-                        row_final[c] = row_antiga[c]
-                    registros_merged.append(row_final)
-            else:
-                registros_merged.append(row_base.to_dict())
-
-        df_completo = pd.DataFrame(registros_merged)
-    else:
-        df_completo = df_base.copy()
-
-    # --- COMPONENTE VISUAL DO CALENDÁRIO ---
-    st.markdown("### 📅 Visualização em Calendário Interativo")
-    if HAS_CALENDAR_COMPONENT:
-        events = []
-        # Renderiza viagens cadastradas da banca selecionada
-        for v in st.session_state["viagens_registradas"]:
-            if v["Banca"] == banca_sel or (v.get("Apoio Conjunto") and banca_sel in ["Banca Caxias", "Banca Timon"]):
-                events.append({
-                    "title": f"🚍 Viagem: {v['Destino']} ({v['Examinadores']} Ex.)",
-                    "start": v["Data Inicio"].isoformat(),
-                    "end": (v["Data Fim"] + datetime.timedelta(days=1)).isoformat(),
-                    "color": "#2B6CB0" if v["Destino"] == local_sel else "#718096",
-                    "allDay": True,
-                })
-        
-        # Renderiza feriados
-        for f_date in datas_feriados_set:
-            if f_date.month == mes_num and f_date.year == ano_sel:
-                events.append({
-                    "title": "🔴 Feriado / Sem Atendimento",
-                    "start": f_date.isoformat(),
-                    "color": "#E53E3E",
-                    "allDay": True,
-                })
-
-        calendar_options = {
-            "editable": True,
-            "selectable": True,
-            "headerToolbar": {
-                "left": "prev,next today",
-                "center": "title",
-                "right": "dayGridMonth,timeGridWeek"
-            },
-            "initialDate": f"{ano_sel}-{mes_num:02d}-01",
-            "locale": "pt-br",
-        }
-        
-        cal_data = st_calendar(events=events, options=calendar_options, key=f"cal_visual_{chave_guardar}")
-        
-        # Sincronização básica se o usuário mover um evento no calendário
-        if cal_data.get("eventChange"):
-            event_changed = cal_data["eventChange"]["event"]
-            title = event_changed.get("title", "")
-            if title.startswith("🚍 Viagem:"):
-                dest_match = re.search(r"Viagem:\s*([^(]+)", title)
-                if dest_match:
-                    dest_nome = dest_match.group(1).strip()
-                    try:
-                        n_start = datetime.date.fromisoformat(event_changed["start"].split("T")[0])
-                        n_end = datetime.date.fromisoformat(event_changed["end"].split("T")[0]) - datetime.timedelta(days=1)
-                        if n_end < n_start:
-                            n_end = n_start
-                        
-                        for v in st.session_state["viagens_registradas"]:
-                            if v["Banca"] == banca_sel and v["Destino"] == dest_nome:
-                                v["Data Inicio"] = n_start
-                                v["Data Fim"] = n_end
-                                st.toast(f"Datas da viagem para {dest_nome} atualizadas via calendário!")
-                                st.rerun()
-                                break
-                    except Exception:
-                        pass
-    else:
-        st.info("💡 Para ativar a interface gráfica e arrastar viagens diretamente na tela, adicione `streamlit-calendar` ao seu `requirements.txt`.")
+    _calendario_visual(banca, local, ano, mes_numero, feriados, chave)
 
     st.markdown("### 📝 Lançamento e Edição de Vagas por Horário")
-    if tem_viagem_para_local:
-        v_ref = viagens_da_localidade[0]
+
+    viagens_do_local = [
+        v
+        for v in st.session_state["viagens_registradas"]
+        if banca_vinculada(v, banca) and v.get("Destino") == local
+    ]
+    if viagens_do_local:
+        referencia = viagens_do_local[0]
+        ajustes = descricao_turnos(referencia)
         st.success(
-            f"🚍 **Viagem Detectada**: {local_sel} tem viagem registrada de"
-            f" **{v_ref['Data Inicio'].strftime('%d/%m/%Y')}** a"
-            f" **{v_ref['Data Fim'].strftime('%d/%m/%Y')}** com"
-            f" **{v_ref['Examinadores']} examinadores**. As datas foram ativadas"
-            " automaticamente abaixo!"
-        )
-    elif is_banca_regional and is_sede:
-        st.info(
-            f"📍 Configurando **{local_sel}** ({banca_sel}). As datas em que a equipe"
-            " estiver em viagem itinerante ficam marcadas como Indisponível na Sede."
+            f"🚍 **Viagem detectada**: {local} tem viagem registrada de"
+            f" **{formatar_br(para_data(referencia['Data Inicio']))}** a"
+            f" **{formatar_br(para_data(referencia['Data Fim']))}** com"
+            f" **{examinadores_da_banca_na_viagem(referencia, banca)} examinadores**"
+            f" ({referencia.get('Turno', TURNO_INTEGRAL)})."
+            + (f" Ajustes por dia: {ajustes}." if ajustes else "")
         )
     else:
-        st.info(f"📍 Configurando calendário para **{local_sel}** ({banca_sel}).")
+        st.info(f"📍 Configurando calendário para **{local}** ({banca}).")
 
-    col_filtro1, col_filtro2 = st.columns([1, 2])
+    if df_completo.empty:
+        st.warning("Nenhuma data de atendimento gerada para os parâmetros atuais.")
+        return
 
-    dt_inicio_mes = datetime.date(ano_sel, mes_num, 1)
-    dt_fim_mes = datetime.date(ano_sel, mes_num, num_dias)
+    total_dias = calendar.monthrange(ano, mes_numero)[1]
+    primeiro_dia = datetime.date(ano, mes_numero, 1)
+    ultimo_dia = datetime.date(ano, mes_numero, total_dias)
 
-    with col_filtro1:
-        periodo_selecionado = st.date_input(
+    col_periodo, col_datas = st.columns([1, 2])
+    with col_periodo:
+        periodo = st.date_input(
             "🔍 Filtrar por Período de Atendimento:",
-            value=(dt_inicio_mes, dt_fim_mes),
-            min_value=dt_inicio_mes,
-            max_value=dt_fim_mes,
+            value=(primeiro_dia, ultimo_dia),
+            min_value=primeiro_dia,
+            max_value=ultimo_dia,
             format="DD/MM/YYYY",
-            key=f"filtro_periodo_{chave_guardar}"
+            key=f"cal_filtro_periodo_{chave}",
         )
-
-    with col_filtro2:
-        datas_opcoes = sorted(list(df_completo["Data"].unique()), key=lambda x: datetime.datetime.strptime(x, "%d/%m/%Y"))
-        datas_filtradas_select = st.multiselect(
-            "📌 Ou Selecione Dias Específicos do Mês:",
-            options=datas_opcoes,
+    with col_datas:
+        datas_selecionadas = st.multiselect(
+            "📌 Ou selecione dias específicos do mês:",
+            options=datas_do_mes,
             default=[],
             placeholder="Selecione um ou mais dias...",
-            key=f"filtro_datas_mult_{chave_guardar}"
+            key=f"cal_filtro_datas_{chave}",
         )
 
-    if datas_filtradas_select:
-        df_exibicao = df_completo[df_completo["Data"].isin(datas_filtradas_select)].copy()
-    elif isinstance(periodo_selecionado, (tuple, list)) and len(periodo_selecionado) == 2:
-        p_ini, p_fim = periodo_selecionado
-        df_completo["_dt_temp"] = pd.to_datetime(df_completo["Data"], format="%d/%m/%Y").dt.date
-        df_exibicao = df_completo[(df_completo["_dt_temp"] >= p_ini) & (df_completo["_dt_temp"] <= p_fim)].drop(columns=["_dt_temp"]).copy()
+    if datas_selecionadas:
+        df_exibicao = df_completo[df_completo["Data"].isin(datas_selecionadas)].copy()
+    elif isinstance(periodo, (tuple, list)) and len(periodo) == 2:
+        inicio, fim = periodo
+        convertidas = pd.to_datetime(df_completo["Data"], format="%d/%m/%Y").dt.date
+        df_exibicao = df_completo[
+            (convertidas >= inicio) & (convertidas <= fim)
+        ].copy()
     else:
         df_exibicao = df_completo.copy()
 
-    opcoes_status = ["Disponível", "Indisponível", "Feriado / Sem Atendimento"]
-
-    config_cols = {
+    configuracao = {
         "Data": st.column_config.TextColumn("Data", disabled=True),
         "Dia da Semana": st.column_config.TextColumn("Dia", disabled=True),
         "Status": st.column_config.SelectboxColumn(
-            "Status", options=opcoes_status, required=True
+            "Status", options=OPCOES_STATUS, required=True
         ),
         "Exam. M": st.column_config.NumberColumn(
-            "Exam. M", min_value=0, max_value=50, step=1
+            "Exam. M", min_value=0, max_value=50, step=1, default=0
         ),
         "Exam. T": st.column_config.NumberColumn(
-            "Exam. T", min_value=0, max_value=50, step=1
+            "Exam. T", min_value=0, max_value=50, step=1, default=0
         ),
         "Horário": st.column_config.TextColumn("Horário", disabled=True),
+        "Total": st.column_config.NumberColumn("Total", disabled=True),
     }
-
-    for c in cols_vagas:
-        config_cols[c] = st.column_config.NumberColumn(
-            c, min_value=0, step=1, default=0
+    for coluna in COLS_VAGAS:
+        configuracao[coluna] = st.column_config.NumberColumn(
+            coluna, min_value=0, step=1, default=0
         )
 
-    chave_tabela_estavel = (
-        f"editor_tabela_{banca_sel}_{local_sel}_{mes_nome}_{ano_sel}"
+    chave_editor = f"editor_{chave}"
+    chave_assinatura = f"{chave_editor}__filtro"
+    assinatura = (
+        tuple(sorted(datas_selecionadas)) if datas_selecionadas else str(periodo)
     )
-    chave_assinatura_filtro = f"{chave_tabela_estavel}__ultimo_filtro"
-    assinatura_filtro_atual = (
-        tuple(sorted(datas_filtradas_select))
-        if datas_filtradas_select
-        else str(periodo_selecionado)
-    )
-    if st.session_state.get(chave_assinatura_filtro) != assinatura_filtro_atual:
-        st.session_state.pop(chave_tabela_estavel, None)
-        st.session_state[chave_assinatura_filtro] = assinatura_filtro_atual
+    if st.session_state.get(chave_assinatura) != assinatura:
+        st.session_state.pop(chave_editor, None)
+        st.session_state[chave_assinatura] = assinatura
 
-    df_editado_filtrado = st.data_editor(
+    df_editado = st.data_editor(
         df_exibicao,
-        column_config=config_cols,
-        use_container_width=True,
+        column_config=configuracao,
+        **LARGURA_TOTAL,
         num_rows="fixed",
         height=450,
-        key=chave_tabela_estavel,
+        key=chave_editor,
     )
 
-    df_completo.update(df_editado_filtrado)
+    # ``update`` ignora NaN: sem o fillna, apagar uma célula descartava a edição.
+    colunas_numericas = ["Exam. M", "Exam. T"] + COLS_VAGAS
+    df_editado = df_editado.copy()
+    for coluna in colunas_numericas:
+        df_editado[coluna] = (
+            pd.to_numeric(df_editado[coluna], errors="coerce").fillna(0).astype(int)
+        )
+    df_editado["Status"] = df_editado["Status"].fillna(STATUS_DISPONIVEL)
 
-    def recalcular_linha(row):
-        if row["Status"] in ["Feriado / Sem Atendimento", "Indisponível"]:
+    df_completo.update(df_editado)
+    for coluna in colunas_numericas:
+        df_completo[coluna] = (
+            pd.to_numeric(df_completo[coluna], errors="coerce").fillna(0).astype(int)
+        )
+
+    def _total_da_linha(linha: pd.Series) -> int:
+        if linha["Status"] in STATUS_BLOQUEADOS:
             return 0
-        return sum(row[c] for c in cols_vagas)
+        return int(sum(int(linha[c]) for c in COLS_VAGAS))
 
-    df_completo["Total"] = df_completo.apply(recalcular_linha, axis=1)
-    st.session_state["historico_localidades"][chave_guardar] = df_completo
+    df_completo["Total"] = df_completo.apply(_total_da_linha, axis=1)
+    bloqueadas = df_completo["Status"].isin(STATUS_BLOQUEADOS)
+    df_completo.loc[bloqueadas, ["Exam. M", "Exam. T"]] = 0
 
-    # MONITOR DE EFETIVO
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("🔍 Consulta de Efetivo por Data")
+    st.session_state["historico_localidades"][chave] = df_completo
+    salvar_historico(chave, df_completo)
 
-    if datas_disponiveis_mes:
-        data_consulta = st.sidebar.selectbox(
-            "Escolha a Data para checar o total:", datas_disponiveis_mes
-        )
-
-        detalhes_dia = []
-        total_m_dia = 0
-        total_t_dia = 0
-
-        prefixo_busca = f"{banca_sel}_{mes_nome}_{ano_sel}_"
-        for k_loc, df_loc in st.session_state["historico_localidades"].items():
-            if k_loc.startswith(prefixo_busca):
-                local_nome = k_loc.replace(prefixo_busca, "")
-                df_dia = df_loc[
-                    (df_loc["Data"] == data_consulta) & (df_loc["Status"] == "Disponível")
-                ]
-
-                if not df_dia.empty:
-                    data_obj = datetime.datetime.strptime(data_consulta, "%d/%m/%Y").date()
-                    viagem_m = next(
-                        (v for v in st.session_state["viagens_registradas"]
-                         if banca_vinculada(v, banca_sel)
-                         and v.get("Destino") == local_nome
-                         and viagem_cobre_periodo(v, data_obj, "Manhã")),
-                        None,
-                    )
-                    viagem_t = next(
-                        (v for v in st.session_state["viagens_registradas"]
-                         if banca_vinculada(v, banca_sel)
-                         and v.get("Destino") == local_nome
-                         and viagem_cobre_periodo(v, data_obj, "Tarde")),
-                        None,
-                    )
-
-                    ex_m_loc = 0 if viagem_m else int(df_dia["Exam. M"].max())
-                    ex_t_loc = 0 if viagem_t else int(df_dia["Exam. T"].max())
-                    total_m_dia += ex_m_loc
-                    total_t_dia += ex_t_loc
-                    if ex_m_loc or ex_t_loc:
-                        detalhes_dia.append(
-                            {"Localidade": local_nome, "Manhã": ex_m_loc, "Tarde": ex_t_loc}
-                        )
-
-        equipes_manha = {}
-        equipes_tarde = {}
-        data_obj = datetime.datetime.strptime(data_consulta, "%d/%m/%Y").date()
-        for v in st.session_state["viagens_registradas"]:
-            if not banca_vinculada(v, banca_sel):
-                continue
-            equipe = int(v.get("Numero Banca Itinerante", 0))
-            qtd = examinadores_da_banca_na_viagem(v, banca_sel)
-            if qtd <= 0:
-                continue
-            if viagem_cobre_periodo(v, data_obj, "Manhã"):
-                equipes_manha[equipe] = max(equipes_manha.get(equipe, 0), qtd)
-            if viagem_cobre_periodo(v, data_obj, "Tarde"):
-                equipes_tarde[equipe] = max(equipes_tarde.get(equipe, 0), qtd)
-
-        total_m_dia += sum(equipes_manha.values())
-        total_t_dia += sum(equipes_tarde.values())
-
-        for equipe, qtd in equipes_manha.items():
-            detalhes_dia.append({"Localidade": f"Banca itinerante {equipe} (Viagem)", "Manhã": qtd, "Tarde": 0})
-        for equipe, qtd in equipes_tarde.items():
-            detalhes_dia.append({"Localidade": f"Banca itinerante {equipe} (Viagem)", "Manhã": 0, "Tarde": qtd})
-
-        max_uso_dia = max(total_m_dia, total_t_dia)
-        saldo_dia = efetivo_diario_banca - max_uso_dia
-
-        st.sidebar.markdown(f"**Escala do Dia:** `{data_consulta}`")
-        st.sidebar.metric(
-            "Efetivo Usado no Dia", f"{max_uso_dia} / {efetivo_diario_banca}"
-        )
-        st.sidebar.metric("Saldo Restante", f"{saldo_dia}")
-
-        if max_uso_dia > efetivo_diario_banca:
-            st.sidebar.error(
-                "⚠️ **ESTOURO DE EFETIVO!** Excesso de"
-                f" {max_uso_dia - efetivo_diario_banca} examinadores."
-            )
-
-        if detalhes_dia:
-            st.sidebar.markdown("**Distribuição por Localidade nesta Data:**")
-            df_detalhes = pd.DataFrame(detalhes_dia)
-            st.sidebar.dataframe(
-                df_detalhes, use_container_width=True, hide_index=True
-            )
-        else:
-            st.sidebar.info("Sem exames ou viagens nesta data.")
-
-    # INDICADORES INFERIORES
-    totais_por_data = {}
-    prefixo_banca_mes = f"{banca_sel}_{mes_nome}_{ano_sel}_"
-
-    for k_loc, df_loc in st.session_state["historico_localidades"].items():
-        if k_loc.startswith(prefixo_banca_mes):
-            df_disp = df_loc[df_loc["Status"] == "Disponível"]
-            if not df_disp.empty:
-                for data_str, df_grupo_data in df_disp.groupby("Data"):
-                    ex_m_loc = df_grupo_data["Exam. M"].max()
-                    ex_t_loc = df_grupo_data["Exam. T"].max()
-
-                    if data_str not in totais_por_data:
-                        totais_por_data[data_str] = {"M": 0, "T": 0}
-                    totais_por_data[data_str]["M"] += ex_m_loc
-                    totais_por_data[data_str]["T"] += ex_t_loc
-
-    for dia_num in range(1, num_dias + 1):
-        data_obj = datetime.date(ano_sel, mes_num, dia_num)
-        data_str = data_obj.strftime("%d/%m/%Y")
-        equipes_manha = {}
-        equipes_tarde = {}
-        for v in st.session_state["viagens_registradas"]:
-            if not banca_vinculada(v, banca_sel):
-                continue
-            qtd = examinadores_da_banca_na_viagem(v, banca_sel)
-            equipe = int(v.get("Numero Banca Itinerante", 0))
-            if qtd <= 0:
-                continue
-            if viagem_cobre_periodo(v, data_obj, "Manhã"):
-                equipes_manha[equipe] = max(equipes_manha.get(equipe, 0), qtd)
-            if viagem_cobre_periodo(v, data_obj, "Tarde"):
-                equipes_tarde[equipe] = max(equipes_tarde.get(equipe, 0), qtd)
-        if equipes_manha or equipes_tarde:
-            if data_str not in totais_por_data:
-                totais_por_data[data_str] = {"M": 0, "T": 0}
-            totais_por_data[data_str]["M"] += sum(equipes_manha.values())
-            totais_por_data[data_str]["T"] += sum(equipes_tarde.values())
-
-    picos_diarios = (
-        [max(v["M"], v["T"]) for v in totais_por_data.values()]
-        if totais_por_data
-        else [max(def_ex_m, def_ex_t)]
-    )
-    pico_demanda_diaria = max(picos_diarios)
+    _monitor_efetivo(banca, mes_nome, ano, datas_do_mes, int(efetivo_maximo))
 
     st.markdown("---")
-    m_col1, m_col2, m_col3 = st.columns(3)
-    with m_col1:
-        st.metric("Total Vagas Localidade", f"{int(df_completo['Total'].sum())} vagas")
-    with m_col2:
-        st.metric(
-            "Maior Pico Diário no Mês",
-            f"{int(pico_demanda_diaria)} / {efetivo_diario_banca} examinadores",
-        )
-    with m_col3:
-        saldo_diario = efetivo_diario_banca - pico_demanda_diaria
-        st.metric("Menor Folga Diária", f"{int(saldo_diario)} examinadores")
+    pico = _pico_do_mes(banca, mes_nome, ano, mes_numero)
+    col_a, col_b, col_c = st.columns(3)
+    col_a.metric("Total Vagas Localidade", f"{int(df_completo['Total'].sum())} vagas")
+    col_b.metric("Maior Pico Diário no Mês", f"{pico} / {int(efetivo_maximo)} exam.")
+    col_c.metric("Menor Folga Diária", f"{int(efetivo_maximo) - pico} exam.")
 
-    if pico_demanda_diaria > efetivo_diario_banca:
+    if pico > efetivo_maximo:
         st.error(
-            "🚨 **BLOQUEIO DE SEGURANÇA**: Excesso de examinadores escalados em"
-            " relação ao limite diário disponível."
+            "🚨 **BLOQUEIO DE SEGURANÇA**: o pico de examinadores escalados excede"
+            " o limite diário disponível. Ajuste a escala antes de publicar."
         )
+        return
+
+    st.markdown("### 🖨️ Conferência e Impressão")
+    col_pdf_local, col_pdf_banca = st.columns(2)
+
+    with col_pdf_local:
+        st.markdown(f"**Grade detalhada — {local}**")
+        bloco_pdf(
+            chave=f"loc_{chave}",
+            rotulo_gerar="📄 Gerar PDF desta Localidade",
+            gerador=lambda: gerar_pdf_localidade(
+                df_completo, banca, local, mes_nome, ano
+            ),
+            nome_arquivo=(
+                f"Calendario_{banca}_{local}_{mes_nome}_{ano}.pdf".replace(" ", "_")
+            ),
+            ajuda="Linha a linha, por horário, apenas desta localidade.",
+        )
+
+    with col_pdf_banca:
+        st.markdown(f"**Calendário completo — {banca}**")
+        dados_banca = dados_da_banca_no_mes(banca, mes_nome, ano)
+        st.caption(
+            f"{len(dados_banca)} localidade(s) lançada(s) no mês. Ordem do"
+            " documento: unidades da sede, região metropolitana e demais"
+            " municípios por data do primeiro exame."
+        )
+        bloco_pdf(
+            chave=f"banca_{banca}_{mes_nome}_{ano}",
+            rotulo_gerar="📘 Gerar PDF Completo da Banca",
+            gerador=lambda: gerar_pdf_banca(
+                dados_da_banca_no_mes(banca, mes_nome, ano),
+                st.session_state["viagens_registradas"],
+                st.session_state["bancas_config"],
+                banca,
+                mes_nome,
+                ano,
+                mes_numero,
+                int(efetivo_maximo),
+            ),
+            nome_arquivo=(
+                f"Calendario_Completo_{banca}_{mes_nome}_{ano}.pdf".replace(" ", "_")
+            ),
+            ajuda=(
+                "Mostra como o calendário da banca inteira está se desenhando,"
+                " com a conferência de efetivo diário."
+            ),
+        )
+
+
+# --- Aba: gestão de viagens itinerantes -------------------------------------
+def _validar_capacidade(
+    bancas_alvo: list[str],
+    inicio: datetime.date,
+    fim: datetime.date,
+    turno: str,
+    turnos_por_data: dict[str, str],
+    numero_equipe: int,
+    examinadores_por_banca: dict[str, int],
+    ignorar_id=None,
+) -> list[str]:
+    """Verifica se o deslocamento simultâneo cabe no limite fora da sede."""
+    erros: list[str] = []
+    viagens = st.session_state["viagens_registradas"]
+    limites = st.session_state["limite_fora_sede_bancas"]
+    capacidades = st.session_state["capacidade_bancas"]
+    disponibilidade = st.session_state["disponibilidade_semanal"]
+
+    candidata = {
+        "Data Inicio": inicio,
+        "Data Fim": fim,
+        "Turno": turno,
+        "Turnos Por Data": turnos_por_data,
+    }
+
+    for data_cursor in dias_do_intervalo(inicio, fim, apenas_uteis=True):
+        for banca in bancas_alvo:
+            quantidade_nova = int(examinadores_por_banca.get(banca, 0))
+            picos = []
+            for periodo in (TURNO_MANHA, TURNO_TARDE):
+                por_equipe: dict[int, int] = {}
+                for viagem in viagens:
+                    if ignorar_id is not None and viagem.get("id") == ignorar_id:
+                        continue
+                    if banca_vinculada(viagem, banca) and viagem_cobre_periodo(
+                        viagem, data_cursor, periodo
+                    ):
+                        equipe = int(viagem.get("Numero Banca Itinerante", 0) or 0)
+                        por_equipe[equipe] = max(
+                            por_equipe.get(equipe, 0),
+                            examinadores_da_banca_na_viagem(viagem, banca),
+                        )
+                if viagem_cobre_periodo(candidata, data_cursor, periodo):
+                    por_equipe[int(numero_equipe)] = max(
+                        por_equipe.get(int(numero_equipe), 0), quantidade_nova
+                    )
+                picos.append(sum(por_equipe.values()))
+
+            pico = max(picos or [0])
+            limite = int(limites.get(banca, capacidades.get(banca, 0)))
+            chave_semana = chave_disponibilidade(banca, data_cursor)
+            disponivel = int(disponibilidade.get(chave_semana, capacidades.get(banca, 0)))
+            teto = min(limite, disponivel)
+            if pico > teto:
+                erros.append(
+                    f"{banca}: deslocamento simultâneo de {pico} examinadores excede"
+                    f" o teto de {teto} em {formatar_br(data_cursor)}."
+                )
+                return erros
+    return erros
+
+
+def _alertas_de_feriado(
+    banca: str, destino: str, inicio: datetime.date, fim: datetime.date
+) -> list[datetime.date]:
+    texto = st.session_state["feriados_locais_dict"].get(chave_local(banca, destino), "")
+    datas = datas_de_feriado_do_texto(texto, inicio.year)
+    datas |= datas_de_feriado_do_texto(texto, fim.year)
+    return sorted(d for d in datas if inicio <= d <= fim)
+
+
+def _editor_turnos_por_dia(
+    inicio: datetime.date,
+    fim: datetime.date,
+    turno_geral: str,
+    prefixo_chave: str,
+    valores_atuais: dict[str, str] | None = None,
+    expandido: bool = False,
+) -> dict[str, str]:
+    """Permite definir o turno dia a dia dentro do período da viagem.
+
+    É o que resolve o caso de a equipe atender Pinheiro pela manhã e São Bento
+    à tarde no dia 12: sem isso, o turno valia para todos os dias do trecho e
+    o quadro contava 6 + 6 examinadores no mesmo dia.
+    """
+    valores_atuais = valores_atuais or {}
+    dias = dias_do_intervalo(inicio, fim)
+    if not dias:
+        return {}
+    if len(dias) > 45:
+        st.warning("Período muito longo para o ajuste dia a dia.")
+        return dict(valores_atuais)
+
+    # Os seletores guardam estado por chave. Se o período ou o turno geral
+    # mudam, os valores antigos ficariam presos e o sistema acusaria conflito
+    # onde não há — por isso o estado é descartado quando o contexto muda.
+    chave_contexto = f"{prefixo_chave}__contexto"
+    contexto = (inicio.isoformat(), fim.isoformat(), turno_geral)
+    if st.session_state.get(chave_contexto) != contexto:
+        for chave_antiga in [
+            k
+            for k in st.session_state
+            if k.startswith(f"{prefixo_chave}_") and k != chave_contexto
+        ]:
+            st.session_state.pop(chave_antiga, None)
+        st.session_state[chave_contexto] = contexto
+
+    resultado: dict[str, str] = {}
+    with st.expander(
+        f"🗓️ Ajuste de turno por dia ({len(dias)} dia(s))", expanded=expandido
+    ):
+        st.caption(
+            "Por padrão todos os dias seguem o período geral da viagem. Altere"
+            " apenas os dias em que a equipe atende só um turno, ou use"
+            f" **{TURNO_SEM_ATENDIMENTO}** para dias de deslocamento e fins de"
+            " semana."
+        )
+        colunas = st.columns(min(len(dias), 3))
+        for indice, dia in enumerate(dias):
+            iso = dia.isoformat()
+            atual = valores_atuais.get(iso, turno_geral)
+            if atual not in TURNOS_POR_DIA:
+                atual = turno_geral
+            with colunas[indice % len(colunas)]:
+                escolhido = st.selectbox(
+                    f"{formatar_curto(dia)} ({nome_dia_semana(dia)[:3]})",
+                    TURNOS_POR_DIA,
+                    index=TURNOS_POR_DIA.index(atual),
+                    key=f"{prefixo_chave}_{iso}",
+                )
+            if escolhido != turno_geral:
+                resultado[iso] = escolhido
+    return resultado
+
+
+def _formulario_cadastro_viagem() -> None:
+    st.markdown("#### ➕ Cadastrar Nova Viagem")
+
+    bancas_config = st.session_state["bancas_config"]
+    if not bancas_config:
+        st.warning("Cadastre ao menos uma banca na aba de Gestão de Localidades.")
+        return
+
+    viagens = st.session_state["viagens_registradas"]
+    banca = st.selectbox("Banca Responsável:", list(bancas_config.keys()), key="v_banca")
+
+    numeros_existentes = numeros_de_equipe(viagens, banca)
+    proximo = proximo_numero_equipe(viagens, banca)
+    opcoes_equipe = {f"➕ Nova banca itinerante (Banca {proximo:02d})": proximo}
+    for numero in numeros_existentes:
+        opcoes_equipe[f"🔁 Continuar Banca {numero:02d} já cadastrada"] = numero
+
+    escolha = st.selectbox(
+        "Esta viagem pertence a:",
+        list(opcoes_equipe.keys()),
+        key="v_equipe",
+        help=(
+            "Se a mesma equipe vai atender mais de um município na mesma viagem,"
+            " cadastre o primeiro trecho como 'Nova banca itinerante' e os"
+            " seguintes como 'Continuar' essa mesma banca. Assim o sistema conta"
+            " os examinadores uma única vez."
+        ),
+    )
+    numero_equipe = opcoes_equipe[escolha]
+
+    trecho_referencia = next(
+        (
+            v
+            for v in viagens
+            if v.get("Banca") == banca
+            and int(v.get("Numero Banca Itinerante", 0) or 0) == numero_equipe
+        ),
+        None,
+    )
+    padrao_examinadores = int(
+        (trecho_referencia or {}).get("Examinadores")
+        or st.session_state["limite_fora_sede_bancas"].get(
+            banca, st.session_state["capacidade_bancas"].get(banca, 1)
+        )
+        or 1
+    )
+
+    bancas_apoio: list[str] = []
+    possiveis = bancas_apoio_disponiveis(banca)
+    if possiveis:
+        bancas_apoio = st.multiselect(
+            "🤝 Bancas em apoio conjunto:",
+            possiveis,
+            key="v_apoio",
+            help="O efetivo de cada banca é informado separadamente abaixo.",
+        )
+
+    sede = obter_sede(bancas_config, banca)
+    destinos = [l for l in bancas_config[banca] if l != sede] or bancas_config[banca]
+    if not destinos:
+        st.warning("Esta banca não possui localidades cadastradas.")
+        return
+    destino = st.selectbox("Município de Destino:", destinos, key="v_destino")
+
+    hoje = datetime.date.today()
+    col_ini, col_fim = st.columns(2)
+    data_inicio = col_ini.date_input(
+        "Início da Viagem:", hoje, format="DD/MM/YYYY", key="v_inicio"
+    )
+    data_fim = col_fim.date_input(
+        "Término da Viagem:",
+        hoje + datetime.timedelta(days=4),
+        format="DD/MM/YYYY",
+        key="v_fim",
+    )
+
+    turno = st.selectbox(
+        "Período de atendimento (padrão do trecho):",
+        TURNOS,
+        key="v_turno",
+        help=(
+            "Este é o padrão aplicado a todos os dias. Para dias em que a equipe"
+            " atende só um turno, use o ajuste dia a dia logo abaixo."
+        ),
+    )
+
+    turnos_por_data: dict[str, str] = {}
+    if data_fim >= data_inicio:
+        turnos_por_data = _editor_turnos_por_dia(
+            data_inicio, data_fim, turno, "v_turno_dia"
+        )
+        if turnos_por_data:
+            st.info(
+                "Ajustes aplicados: "
+                + " · ".join(
+                    f"{formatar_curto(para_data(iso))} → {valor}"
+                    for iso, valor in sorted(turnos_por_data.items())
+                )
+            )
+
+    examinadores_por_banca: dict[str, int] = {}
+    participantes = bancas_para_validar(banca, bancas_apoio)
+    if bancas_apoio:
+        colunas = st.columns(len(participantes))
+        for coluna, participante in zip(colunas, participantes):
+            limite = int(st.session_state["limite_fora_sede_bancas"].get(participante, 50))
+            examinadores_por_banca[participante] = coluna.number_input(
+                f"Examinadores — {participante.replace('Banca ', '')}:",
+                min_value=0,
+                max_value=max(limite, 1),
+                value=min(padrao_examinadores, max(limite, 1)),
+                step=1,
+                key=f"v_exam_{participante}",
+            )
     else:
-        pdf_bytes = gerar_pdf_oficial_enxuto(
-            df_completo, banca_sel, local_sel, mes_nome, ano_sel
-        )
-        st.download_button(
-            label="🖨️ Baixar PDF Enxuto desta Localidade",
-            data=pdf_bytes,
-            file_name=f"Calendario_{banca_sel}_{local_sel}_{mes_nome}_{ano_sel}.pdf",
-            mime="application/pdf",
+        examinadores_por_banca[banca] = st.number_input(
+            "Nº de Examinadores Deslocados:",
+            min_value=1,
+            max_value=50,
+            value=max(1, min(50, padrao_examinadores)),
+            step=1,
+            key="v_exam_unico",
         )
 
-# --- ABA: DASHBOARD E RELATÓRIO CONSOLIDADO ---
-with aba_relatorio:
-    st.markdown("### 📊 Dashboard Executivo de Oferta de Vagas")
+    observacoes = st.text_input(
+        "Observações / Portaria:", placeholder="Ex: Portaria nº 123/2026", key="v_obs"
+    )
 
-    f_col1, f_col2, f_col3, f_col4 = st.columns(4)
-    with f_col1:
-        mes_rel_sel = st.selectbox("🗓️ Mês:", MESES_LISTA, index=5, key="rel_mes")
-    with f_col2:
-        ano_rel_sel = st.selectbox("📅 Ano:", [str(a) for a in ANOS_LISTA], key="rel_ano")
-    with f_col3:
-        bancas_todas = list(st.session_state["bancas_config"].keys())
-        banca_rel_sel = st.selectbox("🏛️ Banca:", ["Todas"] + bancas_todas, key="rel_banca")
-    with f_col4:
-        if banca_rel_sel != "Todas":
-            locais_filtro = ["Todas as Localidades"] + st.session_state["bancas_config"].get(banca_rel_sel, [])
+    # Apenas ``key``: o valor inicial já veio do banco. Passar ``value`` junto
+    # com ``key`` gera warning do Streamlit e conflita ao restaurar backup.
+    controle_ativo = st.checkbox(
+        "Ativar controle automático de capacidade/disponibilidade",
+        key="controle_capacidade_ativo",
+        help="Desativado: permite cadastrar viagens sem bloqueio por capacidade.",
+    )
+    salvar_config("controle_capacidade_ativo", controle_ativo)
+
+    _painel_capacidade()
+
+    if st.button("💾 Registrar Viagem", key="v_btn_salvar"):
+        _registrar_viagem(
+            banca=banca,
+            numero_equipe=numero_equipe,
+            bancas_apoio=bancas_apoio,
+            destino=destino,
+            data_inicio=data_inicio,
+            data_fim=data_fim,
+            turno=turno,
+            turnos_por_data=turnos_por_data,
+            examinadores_por_banca=examinadores_por_banca,
+            observacoes=observacoes,
+            controle_ativo=controle_ativo,
+        )
+
+
+def _painel_capacidade() -> None:
+    with st.expander("⚙️ Capacidade e disponibilidade semanal", expanded=False):
+        st.caption("Ajuste manualmente os limites operacionais de cada banca.")
+        capacidades = st.session_state["capacidade_bancas"]
+        limites = st.session_state["limite_fora_sede_bancas"]
+        colunas = st.columns(2)
+
+        for indice, banca in enumerate(st.session_state["bancas_config"].keys()):
+            with colunas[indice % 2]:
+                capacidades[banca] = st.number_input(
+                    f"{banca} — efetivo total",
+                    min_value=0,
+                    max_value=100,
+                    value=int(capacidades.get(banca, 0)),
+                    key=f"cap_{banca}",
+                )
+                limites[banca] = st.number_input(
+                    f"{banca} — máximo fora da sede",
+                    min_value=0,
+                    max_value=100,
+                    value=int(limites.get(banca, 0)),
+                    key=f"lim_{banca}",
+                )
+        salvar_config("capacidade_bancas", capacidades)
+        salvar_config("limite_fora_sede_bancas", limites)
+
+        st.markdown("**Disponibilidade semanal**")
+        semana_referencia = st.date_input(
+            "Semana de referência (qualquer dia):",
+            datetime.date.today(),
+            format="DD/MM/YYYY",
+            key="v_semana_ref",
+        )
+        segunda = semana_referencia - datetime.timedelta(days=semana_referencia.weekday())
+        disponibilidade = st.session_state["disponibilidade_semanal"]
+        bancas_disp = [
+            b
+            for b in BANCAS_COM_DISPONIBILIDADE_SEMANAL
+            if b in st.session_state["bancas_config"]
+        ]
+        if bancas_disp:
+            colunas_disp = st.columns(len(bancas_disp))
+            for coluna, banca in zip(colunas_disp, bancas_disp):
+                chave = chave_disponibilidade(banca, segunda)
+                with coluna:
+                    disponibilidade[chave] = st.number_input(
+                        f"{banca} — disponível em {formatar_br(segunda)}",
+                        min_value=0,
+                        max_value=100,
+                        value=int(disponibilidade.get(chave, capacidades.get(banca, 0))),
+                        key=f"disp_{banca}_{segunda.isoformat()}",
+                    )
+            salvar_disponibilidade(disponibilidade)
+
+
+def _registrar_viagem(
+    *,
+    banca: str,
+    numero_equipe: int,
+    bancas_apoio: list[str],
+    destino: str,
+    data_inicio: datetime.date,
+    data_fim: datetime.date,
+    turno: str,
+    turnos_por_data: dict[str, str],
+    examinadores_por_banca: dict[str, int],
+    observacoes: str,
+    controle_ativo: bool,
+) -> None:
+    erros: list[str] = []
+
+    if data_fim < data_inicio:
+        erros.append("A data final não pode ser anterior à data de início.")
+
+    total = sum(int(v or 0) for v in examinadores_por_banca.values())
+    if total <= 0:
+        erros.append("Informe ao menos um examinador para a viagem.")
+
+    candidata = {
+        "Data Inicio": data_inicio,
+        "Data Fim": data_fim,
+        "Turno": turno,
+        "Turnos Por Data": turnos_por_data,
+    }
+    if data_fim >= data_inicio and not dias_efetivos_da_viagem(candidata):
+        erros.append(
+            "Todos os dias do período estão marcados como"
+            f" '{TURNO_SEM_ATENDIMENTO}'. A viagem não teria atendimento."
+        )
+
+    conflitos = conflitos_de_rota(
+        st.session_state["viagens_registradas"],
+        banca=banca,
+        numero_equipe=numero_equipe,
+        inicio=data_inicio,
+        fim=data_fim,
+        turno=turno,
+        turnos_por_data=turnos_por_data,
+    )
+    if conflitos:
+        destinos = ", ".join(sorted({str(c.get("Destino", "?")) for c in conflitos}))
+        erros.append(
+            f"Esta equipe já atende {destinos} no mesmo turno de algum dia deste"
+            " período. Use o ajuste de turno por dia para separar manhã e tarde."
+        )
+
+    if controle_ativo:
+        erros.extend(
+            _validar_capacidade(
+                bancas_para_validar(banca, bancas_apoio),
+                data_inicio,
+                data_fim,
+                turno,
+                turnos_por_data,
+                numero_equipe,
+                examinadores_por_banca,
+            )
+        )
+
+    feriados = _alertas_de_feriado(banca, destino, data_inicio, data_fim)
+
+    if erros:
+        for erro in erros:
+            st.error(erro)
+        return
+
+    registro = {
+        "id": None,
+        "Banca": banca,
+        "Numero Banca Itinerante": int(numero_equipe),
+        "Bancas Apoio": list(bancas_apoio),
+        "Destino": destino,
+        "Data Inicio": data_inicio,
+        "Data Fim": data_fim,
+        "Turno": turno,
+        "Turnos Por Data": dict(turnos_por_data),
+        "Examinadores": total,
+        "Examinadores Por Banca": {k: int(v) for k, v in examinadores_por_banca.items()},
+        "Observações": observacoes or "",
+    }
+    st.session_state["viagens_registradas"].append(registro)
+    salvar_viagens(st.session_state["viagens_registradas"])
+
+    if feriados:
+        st.warning(
+            "⚠️ A viagem atravessa feriado(s) municipal(is): "
+            + ", ".join(formatar_br(d) for d in feriados)
+        )
+    st.success(
+        f"Trecho para **{destino}** registrado na Banca {int(numero_equipe):02d}."
+    )
+    st.rerun()
+
+
+def _bloco_equipe(banca: str, numero: int, trechos: list[Viagem]) -> None:
+    destinos: list[str] = []
+    for trecho in trechos:
+        destino = trecho.get("Destino", "")
+        if destino and destino not in destinos:
+            destinos.append(destino)
+    nome_destinos = " e ".join(destinos) if destinos else "Destino não informado"
+
+    referencia = trechos[0]
+    st.markdown(f"**📍 {nome_destinos}** *(Banca Itinerante {numero:02d})*")
+
+    col_ini, col_fim, col_num, col_exam = st.columns([2, 2, 1.5, 1.5])
+    sufixo = f"{banca}_{numero}"
+
+    novo_inicio = col_ini.date_input(
+        "Início",
+        value=para_data(referencia["Data Inicio"]),
+        format="DD/MM/YYYY",
+        key=f"grp_ini_{sufixo}",
+    )
+    novo_fim = col_fim.date_input(
+        "Término",
+        value=para_data(referencia["Data Fim"]),
+        format="DD/MM/YYYY",
+        key=f"grp_fim_{sufixo}",
+    )
+    novo_numero = col_num.number_input(
+        "Nº Banca", value=int(numero), min_value=1, step=1, key=f"grp_num_{sufixo}"
+    )
+    novo_efetivo = col_exam.number_input(
+        "Examinadores",
+        value=int(referencia.get("Examinadores", 1) or 1),
+        min_value=1,
+        step=1,
+        key=f"grp_exam_{sufixo}",
+    )
+
+    mudou = (
+        novo_inicio != para_data(referencia["Data Inicio"])
+        or novo_fim != para_data(referencia["Data Fim"])
+        or int(novo_numero) != int(numero)
+        or int(novo_efetivo) != int(referencia.get("Examinadores", 1) or 1)
+    )
+    if mudou:
+        if novo_fim < novo_inicio:
+            st.error("A data final não pode ser anterior à data de início.")
         else:
-            todos_locais = set()
-            for l_list in st.session_state["bancas_config"].values():
-                todos_locais.update(l_list)
-            locais_filtro = ["Todas as Localidades"] + sorted(list(todos_locais))
-        local_rel_sel = st.selectbox("📍 Localidade:", locais_filtro, key="rel_local")
+            for trecho in trechos:
+                trecho["Data Inicio"] = novo_inicio
+                trecho["Data Fim"] = novo_fim
+                trecho["Numero Banca Itinerante"] = int(novo_numero)
+                trecho["Examinadores"] = int(novo_efetivo)
+                trecho["Turnos Por Data"] = {
+                    iso: valor
+                    for iso, valor in (trecho.get("Turnos Por Data") or {}).items()
+                    if (d := para_data(iso)) and novo_inicio <= d <= novo_fim
+                }
+                por_banca = trecho.get("Examinadores Por Banca") or {}
+                if len(por_banca) == 1:
+                    unica = next(iter(por_banca))
+                    trecho["Examinadores Por Banca"] = {unica: int(novo_efetivo)}
+            salvar_viagens(st.session_state["viagens_registradas"])
+            st.rerun()
 
+    for indice, trecho in enumerate(trechos):
+        ajustes = descricao_turnos(trecho)
+        rotulo = (
+            f"🛠️ {trecho.get('Destino')} — {trecho.get('Turno', TURNO_INTEGRAL)}"
+            + (f" · ajustes: {ajustes}" if ajustes else "")
+        )
+        with st.expander(rotulo, expanded=False):
+            inicio_trecho = para_data(trecho["Data Inicio"])
+            fim_trecho = para_data(trecho["Data Fim"])
+            novo_turno = st.selectbox(
+                "Período padrão deste trecho:",
+                TURNOS,
+                index=TURNOS.index(trecho.get("Turno", TURNO_INTEGRAL))
+                if trecho.get("Turno", TURNO_INTEGRAL) in TURNOS
+                else 0,
+                key=f"trecho_turno_{sufixo}_{indice}",
+            )
+            novos_ajustes = _editor_turnos_por_dia(
+                inicio_trecho,
+                fim_trecho,
+                novo_turno,
+                f"trecho_dia_{sufixo}_{indice}",
+                trecho.get("Turnos Por Data"),
+                expandido=True,
+            )
+            if novo_turno != trecho.get("Turno", TURNO_INTEGRAL) or novos_ajustes != (
+                trecho.get("Turnos Por Data") or {}
+            ):
+                if st.button(
+                    "💾 Aplicar turnos deste trecho",
+                    key=f"trecho_salvar_{sufixo}_{indice}",
+                ):
+                    trecho["Turno"] = novo_turno
+                    trecho["Turnos Por Data"] = novos_ajustes
+                    salvar_viagens(st.session_state["viagens_registradas"])
+                    st.rerun()
+            if trecho.get("Observações"):
+                st.caption(str(trecho["Observações"]))
+
+    col_remover, _ = st.columns([3, 7])
+    if col_remover.button(f"🗑️ Remover Banca {numero:02d}", key=f"del_{sufixo}"):
+        salvar_snapshot(motivo="antes_remover_viagem")
+        st.session_state["viagens_registradas"] = [
+            v
+            for v in st.session_state["viagens_registradas"]
+            if not (
+                v.get("Banca") == banca
+                and int(v.get("Numero Banca Itinerante", 1) or 1) == int(numero)
+            )
+        ]
+        salvar_viagens(st.session_state["viagens_registradas"])
+        st.rerun()
     st.markdown("---")
 
-    resumo_locais = []
-    cols_cat = [
-        "Cat A",
-        "Cat B",
-        "Cat C",
-        "Cat D",
-        "Cat E",
-        "PCD A",
-        "PCD B",
-        "PCD C",
-        "PCD D",
-        "PCD E",
-    ]
 
-    for chave, df_loc in st.session_state["historico_localidades"].items():
-        partes = chave.split("_")
-        if len(partes) < 4:
-            continue
-        b_nome = partes[0]
-        m_nome = partes[1]
-        a_nome = partes[2]
-        l_nome = "_".join(partes[3:])
+def _cronograma_viagens() -> None:
+    st.markdown("### 📋 Cronograma de Viagens Programadas")
+    viagens = st.session_state["viagens_registradas"]
+    if not viagens:
+        st.warning("Nenhuma viagem cadastrada até o momento.")
+        return
 
-        if m_nome != mes_rel_sel or a_nome != str(ano_rel_sel):
-            continue
-        if banca_rel_sel != "Todas" and b_nome != banca_rel_sel:
-            continue
-        if local_rel_sel != "Todas as Localidades" and l_nome != local_rel_sel:
-            continue
+    col_mes, col_ano = st.columns(2)
+    mes_exibicao = col_mes.selectbox(
+        "Mês de referência:", MESES_LISTA, index=indice_mes_atual(), key="v_mes_cronograma"
+    )
+    ano_exibicao = col_ano.selectbox(
+        "Ano de referência:", anos_disponiveis(), index=0, key="v_ano_cronograma"
+    )
+    mes_numero = numero_do_mes(mes_exibicao)
 
-        df_vagas = df_loc[
-            (df_loc["Status"] == "Disponível") & (df_loc["Total"] > 0)
-        ].copy()
-        total_vagas_loc = df_vagas["Total"].sum()
+    st.markdown("#### 🖨️ Escala mensal de viagens")
+    st.caption(
+        "O PDF atrela automaticamente 01 preposto e 01 veículo a cada banca"
+        " itinerante — essa informação existe apenas no documento."
+    )
+    bloco_pdf(
+        chave=f"escala_viagens_{mes_exibicao}_{ano_exibicao}",
+        rotulo_gerar="🚍 Gerar PDF da Escala de Viagens do Mês",
+        gerador=lambda: gerar_pdf_escala_viagens(
+            st.session_state["viagens_registradas"],
+            mes_exibicao,
+            ano_exibicao,
+            mes_numero,
+        ),
+        nome_arquivo=f"Escala_Viagens_{mes_exibicao}_{ano_exibicao}.pdf",
+        ajuda="Consolida todas as equipes itinerantes do mês.",
+        altura_previa=560,
+    )
+    st.markdown("---")
 
-        ex_dia = 0
-        datas_exames_str = "-"
+    for banca in sorted({v.get("Banca", "") for v in viagens if v.get("Banca")}):
+        st.markdown(
+            f'<div class="faixa-banca">MÊS DE {html.escape(mes_exibicao).upper()}'
+            f" — {html.escape(banca).upper()}</div>",
+            unsafe_allow_html=True,
+        )
+        viagens_da_banca = [v for v in viagens if v.get("Banca") == banca]
+        for numero in sorted(
+            {int(v.get("Numero Banca Itinerante", 1) or 1) for v in viagens_da_banca}
+        ):
+            trechos = [
+                v
+                for v in viagens_da_banca
+                if int(v.get("Numero Banca Itinerante", 1) or 1) == numero
+            ]
+            trechos.sort(key=lambda v: para_data(v["Data Inicio"]))
+            _bloco_equipe(banca, numero, trechos)
 
-        if not df_vagas.empty:
-            grp_ex = df_vagas.groupby("Data")[["Exam. M", "Exam. T"]].max()
-            ex_dia = grp_ex.apply(
-                lambda r: max(r["Exam. M"], r["Exam. T"]), axis=1
-            ).max()
 
-            dias_unicos = sorted(
-                list(set([int(d.split("/")[0]) for d in df_vagas["Data"].unique()]))
-            )
-            datas_exames_str = formatar_datas_exames(dias_unicos)
+def aba_viagens() -> None:
+    st.markdown("### 🚍 Controle de Viagens e Equipes Itinerantes")
+    st.info(
+        "Organize aqui os deslocamentos das bancas. As equipes em viagem são"
+        " somadas ao controle de efetivo diário e aplicadas na montagem do"
+        " calendário. Cada equipe é contada uma única vez por dia, mesmo"
+        " atendendo dois municípios em turnos diferentes."
+    )
+    coluna_form, coluna_lista = st.columns([1, 2])
+    with coluna_form:
+        _formulario_cadastro_viagem()
+    with coluna_lista:
+        _cronograma_viagens()
 
-        linha_resumo = {
-            "Banca": b_nome,
-            "Localidade": l_nome,
-            "Mês/Ano": f"{m_nome}/{a_nome}",
-            "Dias com Exame": df_vagas["Data"].nunique() if not df_vagas.empty else 0,
-            "Datas dos exames": datas_exames_str,
-            "Pico Exam./Dia": int(ex_dia),
-            "Total Vagas": int(total_vagas_loc),
-        }
-        for c in cols_cat:
-            linha_resumo[c] = (
-                int(df_vagas[c].sum()) if c in df_vagas.columns else 0
-            )
 
-        resumo_locais.append(linha_resumo)
+# --- Aba: horários e turmas -------------------------------------------------
+PADRAO_HORARIO = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
 
-    if resumo_locais:
-        df_resumo_geral = pd.DataFrame(resumo_locais)
 
-        st.markdown("#### 📈 Resumo Geral da Seleção")
-        kpi1, kpi2, kpi3, kpi4 = st.columns(4)
+def _normalizar_horario(texto: str) -> str | None:
+    bruto = (texto or "").strip().replace("h", ":").replace(".", ":")
+    correspondencia = PADRAO_HORARIO.match(bruto)
+    if not correspondencia:
+        return None
+    hora, minuto = correspondencia.groups()
+    return f"{int(hora):02d}:{minuto}"
 
-        tot_vagas = int(df_resumo_geral["Total Vagas"].sum())
-        tot_dias = int(df_resumo_geral["Dias com Exame"].sum())
-        med_vagas_dia = round(tot_vagas / tot_dias, 1) if tot_dias > 0 else 0
-        pico_max = int(df_resumo_geral["Pico Exam./Dia"].max())
 
-        kpi1.metric("🎯 Total Vagas Ofertadas", f"{tot_vagas} vagas")
-        kpi2.metric("📅 Total Dias com Exame", f"{tot_dias} dias")
-        kpi3.metric("📊 Média Vagas / Dia", f"{med_vagas_dia} vagas")
-        kpi4.metric("👨‍⚖️ Maior Pico Examinadores", f"{pico_max} exam.")
+def _persistir_horarios(lista: list[str], inativos: list[str]) -> None:
+    salvar_config("lista_horarios", lista)
+    salvar_config("horarios_inativos", inativos)
+
+
+def aba_horarios() -> None:
+    st.markdown("### ⏰ Grade de Horários e Turmas")
+    st.info(
+        "Os horários definidos aqui são as linhas geradas para cada dia de"
+        " atendimento na aba **Montar Calendário Detalhado**. Horários"
+        " desativados param de ser oferecidos em novos calendários, mas os"
+        " lançamentos já feitos são preservados."
+    )
+
+    lista: list[str] = st.session_state["lista_horarios"]
+    inativos: list[str] = st.session_state["horarios_inativos"]
+    col_cadastro, col_visao = st.columns([1, 2])
+
+    with col_cadastro:
+        st.markdown("#### ➕ Adicionar Horário")
+        novo = st.text_input("Horário (HH:MM):", placeholder="Ex: 17:30", key="hora_novo")
+        if st.button("➕ Adicionar", key="hora_btn_add"):
+            normalizado = _normalizar_horario(novo)
+            if not normalizado:
+                st.error("Formato inválido. Use HH:MM, por exemplo 14:30.")
+            elif normalizado in lista:
+                st.warning("Este horário já está cadastrado.")
+            else:
+                lista.append(normalizado)
+                lista.sort()
+                _persistir_horarios(lista, inativos)
+                st.success(f"Horário **{normalizado}** adicionado.")
+                st.rerun()
 
         st.markdown("---")
-        st.markdown("#### 🏢 Panorama Detalhado por Localidade")
-        
-        st.dataframe(df_resumo_geral, use_container_width=True, hide_index=True)
+        st.markdown("#### ♻️ Restaurar Grade Padrão")
+        st.caption("Volta aos oito horários originais. Não altera calendários já lançados.")
+        if st.button("♻️ Restaurar padrão", key="hora_btn_padrao"):
+            st.session_state["lista_horarios"] = list(HORARIOS_PADRAO)
+            st.session_state["horarios_inativos"] = []
+            _persistir_horarios(
+                st.session_state["lista_horarios"], st.session_state["horarios_inativos"]
+            )
+            st.success("Grade padrão restaurada.")
+            st.rerun()
 
-        excel_bytes = gerar_excel_modelo_oficial(df_resumo_geral, mes_rel_sel, ano_rel_sel)
-        
-        st.download_button(
-            label="📥 Exportar Relatório Consolidado (Excel Oficial)",
-            data=excel_bytes,
-            file_name=f"Calendario_Publicacao_{mes_rel_sel.upper()}_{ano_rel_sel}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    with col_visao:
+        st.markdown("#### 🗂️ Horários Cadastrados")
+        if not lista:
+            st.warning("Nenhum horário cadastrado. Os calendários sairiam vazios.")
+            return
+
+        ativos = [h for h in lista if h not in inativos]
+        df_visao = pd.DataFrame(
+            {
+                "Horário": lista,
+                "Período": [periodo_do_horario(h) for h in lista],
+                "Ativo": [h not in inativos for h in lista],
+            }
+        ).sort_values("Horário", ignore_index=True)
+
+        editado = st.data_editor(
+            df_visao,
+            hide_index=True,
+            **LARGURA_TOTAL,
+            num_rows="fixed",
+            column_config={
+                "Horário": st.column_config.TextColumn("Horário", disabled=True),
+                "Período": st.column_config.TextColumn("Período", disabled=True),
+                "Ativo": st.column_config.CheckboxColumn(
+                    "Ativo", help="Desmarque para parar de oferecer este horário."
+                ),
+            },
+            key="hora_editor",
         )
-    else:
+
+        novos_inativos = sorted(
+            editado.loc[~editado["Ativo"].fillna(True), "Horário"].tolist()
+        )
+        if novos_inativos != sorted(inativos):
+            st.session_state["horarios_inativos"] = novos_inativos
+            _persistir_horarios(lista, novos_inativos)
+            st.rerun()
+
+        st.markdown("---")
+        col_m, col_t, col_total = st.columns(3)
+        col_m.metric(
+            "Turmas de Manhã",
+            sum(1 for h in ativos if periodo_do_horario(h) == TURNO_MANHA),
+        )
+        col_t.metric(
+            "Turmas de Tarde",
+            sum(1 for h in ativos if periodo_do_horario(h) == TURNO_TARDE),
+        )
+        col_total.metric("Horários ativos", f"{len(ativos)} / {len(lista)}")
+
+        st.markdown("#### 🗑️ Excluir Horário Definitivamente")
+        alvo = st.selectbox("Horário:", lista, key="hora_excluir")
+        st.caption("Para apenas suspender o horário, use a coluna *Ativo* acima.")
+        if st.button("🗑️ Excluir", key="hora_btn_del"):
+            lista.remove(alvo)
+            if alvo in inativos:
+                inativos.remove(alvo)
+            _persistir_horarios(lista, inativos)
+            st.warning(f"Horário **{alvo}** excluído da grade.")
+            st.rerun()
+
+
+# --- Aba: dashboard consolidado ---------------------------------------------
+def _linha_resumo(
+    banca: str, local: str, mes: str, ano: str, df_local: pd.DataFrame
+) -> dict | None:
+    df_vagas = df_local[
+        (df_local["Status"] == STATUS_DISPONIVEL) & (df_local["Total"] > 0)
+    ]
+    if df_vagas.empty:
+        return None
+
+    por_data = df_vagas.groupby("Data")[["Exam. M", "Exam. T"]].max()
+    pico = int(
+        por_data.apply(
+            lambda linha: pico_diario(_num(linha["Exam. M"]), _num(linha["Exam. T"])),
+            axis=1,
+        ).max()
+    )
+    dias = [d.day for d in (para_data(x) for x in df_vagas["Data"].unique()) if d]
+
+    resumo = {
+        "Banca": banca,
+        "Localidade": local,
+        "Mês/Ano": f"{mes}/{ano}",
+        "Dias com Exame": int(df_vagas["Data"].nunique()),
+        "Datas dos exames": formatar_datas_exames(dias),
+        "Pico Exam./Dia": pico,
+        "Total Vagas": int(df_vagas["Total"].fillna(0).sum()),
+    }
+    for coluna in COLS_VAGAS:
+        resumo[coluna] = (
+            int(df_vagas[coluna].fillna(0).sum()) if coluna in df_vagas.columns else 0
+        )
+    return resumo
+
+
+def aba_relatorio() -> None:
+    st.markdown("### 📊 Dashboard Executivo de Oferta de Vagas")
+
+    bancas_config = st.session_state["bancas_config"]
+    col_mes, col_ano, col_banca, col_local = st.columns(4)
+    mes_filtro = col_mes.selectbox(
+        "🗓️ Mês:", MESES_LISTA, index=indice_mes_atual(), key="rel_mes"
+    )
+    ano_filtro = col_ano.selectbox("📅 Ano:", anos_disponiveis(), index=0, key="rel_ano")
+    banca_filtro = col_banca.selectbox(
+        "🏛️ Banca:", ["Todas"] + list(bancas_config.keys()), key="rel_banca"
+    )
+    opcoes_local = (
+        bancas_config.get(banca_filtro, [])
+        if banca_filtro != "Todas"
+        else todas_localidades(bancas_config)
+    )
+    local_filtro = col_local.selectbox(
+        "📍 Localidade:", ["Todas as Localidades"] + opcoes_local, key="rel_local"
+    )
+
+    st.markdown("---")
+
+    resumos = []
+    for chave, df_local in st.session_state["historico_localidades"].items():
+        partes = desmontar_chave_historico(chave)
+        if not partes:
+            LOG.warning("Chave de histórico ignorada por formato inválido: %s", chave)
+            continue
+        banca, mes, ano, local = partes
+        if mes != mes_filtro or ano != str(ano_filtro):
+            continue
+        if banca_filtro != "Todas" and banca != banca_filtro:
+            continue
+        if local_filtro != "Todas as Localidades" and local != local_filtro:
+            continue
+        if df_local is None or df_local.empty:
+            continue
+        resumo = _linha_resumo(banca, local, mes, ano, df_local)
+        if resumo:
+            resumos.append(resumo)
+
+    if not resumos:
         st.info("Nenhum dado cadastrado ou encontrado para os filtros selecionados.")
+        return
 
-# --- ABA: GESTÃO DE LOCALIDADES ---
-with aba_gestao:
-    st.markdown("### ➕ Gestão de Bancas e Localidades")
-    st.info("Adicione ou remova Bancas e Municípios de Atendimento da estrutura do sistema.")
+    df_resumo = pd.DataFrame(resumos).sort_values(
+        ["Banca", "Localidade"], ignore_index=True
+    )
 
-    col_g1, col_g2 = st.columns(2)
+    st.markdown("#### 📈 Resumo Geral da Seleção")
+    total_vagas = int(df_resumo["Total Vagas"].sum())
+    total_dias = int(df_resumo["Dias com Exame"].sum())
+    media = round(total_vagas / total_dias, 1) if total_dias else 0
+    pico_maximo = int(df_resumo["Pico Exam./Dia"].max())
 
-    with col_g1:
-        st.markdown("#### 🏛️ Cadastrar Nova Banca")
-        nova_banca = st.text_input("Nome da Nova Banca:", placeholder="Ex: Banca Balsas")
-        if st.button("➕ Adicionar Banca"):
-            if nova_banca and nova_banca not in st.session_state["bancas_config"]:
-                st.session_state["bancas_config"][nova_banca] = []
-                st.success(f"Banca **{nova_banca}** criada com sucesso!")
-                st.rerun()
-            elif nova_banca in st.session_state["bancas_config"]:
-                st.warning("Esta banca já existe no sistema.")
+    kpi1, kpi2, kpi3, kpi4 = st.columns(4)
+    kpi1.metric("🎯 Total Vagas Ofertadas", f"{total_vagas} vagas")
+    kpi2.metric("📅 Total Dias com Exame", f"{total_dias} dias")
+    kpi3.metric("📊 Média Vagas / Dia", f"{media} vagas")
+    kpi4.metric("👨‍⚖️ Maior Pico Examinadores", f"{pico_maximo} exam.")
 
-    with col_g2:
-        st.markdown("#### 📍 Cadastrar Novo Município / Localidade")
-        banca_destino = st.selectbox(
-            "Selecione a Banca que receberá o local:",
-            list(st.session_state["bancas_config"].keys()),
-            key="gestao_banca_dest"
+    total_categorias = int(df_resumo[COLS_CATEGORIA].sum().sum())
+    total_pcd = int(df_resumo[COLS_PCD].sum().sum())
+    if total_pcd:
+        st.caption(
+            f"Composição: {total_categorias} vagas de categoria comum e"
+            f" {total_pcd} vagas PCD."
         )
-        novo_local = st.text_input("Nome do Município/Localidade:", placeholder="Ex: Balsas - Pátio")
-        if st.button("➕ Adicionar Localidade"):
-            if novo_local:
-                if novo_local not in st.session_state["bancas_config"][banca_destino]:
-                    st.session_state["bancas_config"][banca_destino].append(novo_local)
-                    st.success(f"Localidade **{novo_local}** vinculada à **{banca_destino}** com sucesso!")
-                    st.rerun()
-                else:
+
+    st.markdown("---")
+    st.markdown("#### 🏢 Panorama Detalhado por Localidade")
+    st.dataframe(df_resumo, **LARGURA_TOTAL, hide_index=True)
+
+    incluir_pcd = st.checkbox(
+        "Incluir colunas PCD na planilha de publicação",
+        value=bool(total_pcd),
+        key="rel_incluir_pcd",
+        help=(
+            "O modelo oficial antigo trazia apenas as categorias A–E. Mantenha"
+            " marcado para que os totais da planilha batam com os do painel."
+        ),
+    )
+    excel = gerar_excel_publicacao(df_resumo, mes_filtro, ano_filtro, incluir_pcd)
+    st.download_button(
+        label="📥 Exportar Relatório Consolidado (Excel Oficial)",
+        data=excel,
+        file_name=f"Calendario_Publicacao_{mes_filtro.upper()}_{ano_filtro}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key="rel_download_excel",
+    )
+
+
+# --- Aba: gestão de bancas e localidades ------------------------------------
+def _limpar_dados_da_localidade(banca: str, local: str) -> None:
+    """Remove tudo que está pendurado em uma localidade."""
+    remover_historico_do_local(banca, local)
+
+    chave = chave_local(banca, local)
+    st.session_state["dias_permitidos_dict"].pop(chave, None)
+    st.session_state["feriados_locais_dict"].pop(chave, None)
+
+    restantes = [
+        v
+        for v in st.session_state["viagens_registradas"]
+        if not (banca_vinculada(v, banca) and v.get("Destino") == local)
+    ]
+    removidas = len(st.session_state["viagens_registradas"]) - len(restantes)
+    st.session_state["viagens_registradas"] = restantes
+
+    salvar_dias_permitidos(st.session_state["dias_permitidos_dict"])
+    salvar_feriados_locais(st.session_state["feriados_locais_dict"])
+    if removidas:
+        salvar_viagens(st.session_state["viagens_registradas"])
+    LOG.info(
+        "Localidade %s/%s removida (%d viagens excluídas)", banca, local, removidas
+    )
+
+
+def _contar_dados_da_banca(banca: str) -> tuple[int, int]:
+    calendarios = sum(
+        1
+        for chave in st.session_state["historico_localidades"]
+        if (partes := desmontar_chave_historico(chave)) and partes[0] == banca
+    )
+    viagens = sum(
+        1 for v in st.session_state["viagens_registradas"] if v.get("Banca") == banca
+    )
+    return calendarios, viagens
+
+
+def aba_gestao() -> None:
+    st.markdown("### ➕ Gestão de Bancas e Localidades")
+    st.info(
+        "Adicione ou remova Bancas e Municípios. A remoção apaga também os"
+        " calendários, feriados e viagens vinculados."
+    )
+
+    bancas_config: dict[str, list[str]] = st.session_state["bancas_config"]
+    col_banca, col_local = st.columns(2)
+
+    with col_banca:
+        st.markdown("#### 🏛️ Cadastrar Nova Banca")
+        nova_banca = st.text_input(
+            "Nome da Nova Banca:", placeholder="Ex: Banca Balsas", key="gestao_nova_banca"
+        )
+        if st.button("➕ Adicionar Banca", key="gestao_btn_add_banca"):
+            nome = (nova_banca or "").strip()
+            if not nome:
+                st.warning("Informe um nome para a banca.")
+            elif nome in bancas_config:
+                st.warning("Esta banca já existe no sistema.")
+            else:
+                bancas_config[nome] = []
+                salvar_bancas(bancas_config)
+                st.success(f"Banca **{nome}** criada com sucesso!")
+                st.rerun()
+
+    with col_local:
+        st.markdown("#### 📍 Cadastrar Novo Município / Localidade")
+        if not bancas_config:
+            st.warning("Cadastre uma banca antes de adicionar localidades.")
+        else:
+            banca_destino = st.selectbox(
+                "Selecione a Banca que receberá o local:",
+                list(bancas_config.keys()),
+                key="gestao_banca_destino",
+            )
+            novo_local = st.text_input(
+                "Nome do Município/Localidade:",
+                placeholder="Ex: Balsas - Pátio",
+                key="gestao_novo_local",
+            )
+            st.caption(
+                "A primeira localidade da banca é tratada como sede e aparece"
+                " primeiro nos relatórios em PDF."
+            )
+            if st.button("➕ Adicionar Localidade", key="gestao_btn_add_local"):
+                nome = (novo_local or "").strip()
+                if not nome:
+                    st.warning("Informe um nome para a localidade.")
+                elif nome in bancas_config[banca_destino]:
                     st.warning("Esta localidade já está cadastrada nesta banca.")
+                else:
+                    bancas_config[banca_destino].append(nome)
+                    salvar_bancas(bancas_config)
+                    st.success(f"Localidade **{nome}** vinculada à **{banca_destino}**!")
+                    st.rerun()
 
     st.markdown("---")
     st.markdown("#### 🗑️ Remover Localidade Existente")
-    col_r1, col_r2 = st.columns(2)
-    with col_r1:
-        banca_rem = st.selectbox(
-            "Selecione a Banca:",
-            list(st.session_state["bancas_config"].keys()),
-            key="gestao_banca_rem"
+    col_banca_rem, col_local_rem = st.columns(2)
+
+    if not bancas_config:
+        st.info("Nenhuma banca cadastrada.")
+        return
+
+    with col_banca_rem:
+        banca_remocao = st.selectbox(
+            "Selecione a Banca:", list(bancas_config.keys()), key="gestao_banca_remocao"
         )
-    with col_r2:
-        local_rem = st.selectbox(
-            "Selecione a Localidade para Remover:",
-            st.session_state["bancas_config"][banca_rem],
-            key="gestao_local_rem"
+
+    with col_local_rem:
+        locais = bancas_config.get(banca_remocao, [])
+        if not locais:
+            st.info(f"A banca **{banca_remocao}** não possui localidades cadastradas.")
+        else:
+            local_remocao = st.selectbox(
+                "Selecione a Localidade para Remover:",
+                locais,
+                key="gestao_local_remocao",
+            )
+            confirmar = st.checkbox(
+                f"Confirmo a exclusão de **{local_remocao}** e de todos os dados"
+                " vinculados a ela.",
+                key="gestao_confirma_local",
+            )
+            if st.button("🗑️ Remover Localidade", key="gestao_btn_rem_local"):
+                if not confirmar:
+                    st.warning("Marque a confirmação antes de remover.")
+                else:
+                    salvar_snapshot(motivo="antes_remover_localidade")
+                    _limpar_dados_da_localidade(banca_remocao, local_remocao)
+                    bancas_config[banca_remocao].remove(local_remocao)
+                    salvar_bancas(bancas_config)
+                    st.warning(
+                        f"Localidade **{local_remocao}** e seus dados foram removidos."
+                    )
+                    st.rerun()
+
+    st.markdown("---")
+    with st.expander("⚠️ Remover uma Banca inteira", expanded=False):
+        banca_excluir = st.selectbox(
+            "Banca a excluir:", list(bancas_config.keys()), key="gestao_banca_excluir"
         )
-        if st.button("🗑️ Remover Localidade"):
-            st.session_state["bancas_config"][banca_rem].remove(local_rem)
-            st.warning(f"Localidade **{local_rem}** removida da **{banca_rem}**.")
+        calendarios, viagens = _contar_dados_da_banca(banca_excluir)
+        st.write(
+            f"Serão apagados: **{len(bancas_config.get(banca_excluir, []))}**"
+            f" localidades, **{calendarios}** calendários e **{viagens}** viagens."
+        )
+        confirmar_banca = st.checkbox(
+            "Confirmo a exclusão definitiva desta banca.", key="gestao_confirma_banca"
+        )
+        if st.button("🗑️ Excluir Banca", key="gestao_btn_rem_banca"):
+            if not confirmar_banca:
+                st.warning("Marque a confirmação antes de excluir.")
+            else:
+                salvar_snapshot(motivo="antes_remover_banca")
+                for local in list(bancas_config.get(banca_excluir, [])):
+                    _limpar_dados_da_localidade(banca_excluir, local)
+                bancas_config.pop(banca_excluir, None)
+                st.session_state["capacidade_bancas"].pop(banca_excluir, None)
+                st.session_state["limite_fora_sede_bancas"].pop(banca_excluir, None)
+                salvar_bancas(bancas_config)
+                salvar_config("capacidade_bancas", st.session_state["capacidade_bancas"])
+                salvar_config(
+                    "limite_fora_sede_bancas",
+                    st.session_state["limite_fora_sede_bancas"],
+                )
+                st.warning(f"Banca **{banca_excluir}** excluída.")
+                st.rerun()
+
+
+# ===========================================================================
+# 7. APLICAÇÃO
+# ===========================================================================
+def configurar_logging() -> None:
+    nivel = os.environ.get("DETRAN_LOG_LEVEL", "INFO").upper()
+    logging.basicConfig(
+        level=getattr(logging, nivel, logging.INFO),
+        format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
+    )
+
+
+def painel_backup() -> None:
+    with st.sidebar.expander("💾 Backup e Sincronização", expanded=False):
+        st.caption(
+            "Os dados ficam em banco SQLite e são gravados assim que você altera"
+            " algo. Use os botões abaixo para guardar uma cópia externa ou"
+            " restaurar um backup específico."
+        )
+        nome_arquivo = (
+            f"backup_detran_{datetime.datetime.now().strftime('%Y%m%d_%H%M')}.json"
+        )
+        if st.button("📦 Preparar backup para download", key="btn_preparar_backup"):
+            st.session_state["_backup_pronto"] = backup_em_json()
+
+        if st.session_state.get("_backup_pronto"):
+            st.download_button(
+                "⬇️ Baixar backup",
+                data=st.session_state["_backup_pronto"],
+                file_name=nome_arquivo,
+                mime="application/json",
+                key="btn_baixar_backup",
+            )
+
+        if st.button("🗂️ Gravar snapshot no servidor", key="btn_snapshot"):
+            destino = salvar_snapshot(motivo="manual")
+            if destino:
+                st.success(f"Snapshot gravado: `{destino.name}`")
+
+        st.markdown("---")
+        arquivo = st.file_uploader(
+            "Restaurar um backup (.json):", type=["json"], key="upload_backup"
+        )
+        if arquivo is not None:
+            confirmar = st.checkbox(
+                "Confirmo que este backup deve substituir os dados atuais.",
+                key="confirma_restauracao",
+            )
+            if st.button("♻️ Restaurar este backup", key="btn_restaurar"):
+                if not confirmar:
+                    st.warning("Marque a confirmação antes de restaurar.")
+                else:
+                    try:
+                        aplicar_backup(json.load(arquivo))
+                    except BackupInvalido as erro:
+                        st.error(f"Backup recusado: {erro}")
+                    except json.JSONDecodeError as erro:
+                        st.error(f"O arquivo não é um JSON válido: {erro}")
+                    except Exception as erro:
+                        LOG.exception("Falha inesperada ao restaurar backup")
+                        st.error(f"Falha ao restaurar: {erro}")
+                    else:
+                        st.success("Backup restaurado com sucesso!")
+                        st.rerun()
+
+        st.markdown("---")
+        st.caption(
+            "Se outra pessoa estiver usando o sistema ao mesmo tempo, recarregue"
+            " para ver as alterações dela."
+        )
+        if st.button("🔄 Recarregar dados do banco", key="btn_recarregar"):
+            recarregar_do_banco()
             st.rerun()
 
-# --- AUTOSAVE FINAL ---
-salvar_autosave_em_disco()
+
+def barra_de_status() -> None:
+    erro = st.session_state.get("erro_persistencia")
+    if erro:
+        st.error(
+            "⚠️ O salvamento apresentou erro e os dados podem não ter sido"
+            f" gravados: {erro}"
+        )
+    elif st.session_state.get("ultimo_salvamento"):
+        st.caption(f"💾 Última gravação: {st.session_state['ultimo_salvamento']}")
+
+
+def main() -> None:
+    configurar_logging()
+
+    st.set_page_config(
+        page_title="DETRAN/MA - Gestão de Exames Práticos",
+        page_icon="🚗",
+        layout="wide",
+        initial_sidebar_state="expanded",
+    )
+    st.markdown('<meta name="google" content="notranslate">', unsafe_allow_html=True)
+    st.markdown(CSS_CUSTOMIZADO, unsafe_allow_html=True)
+
+    carregar_estado()
+
+    st.markdown(CABECALHO_HTML, unsafe_allow_html=True)
+    painel_backup()
+    barra_de_status()
+
+    guia_quadro, guia_calendario, guia_viagens, guia_horarios, guia_relatorio, guia_gestao = st.tabs(
+        [
+            "🗓️ Quadro Geral de Examinadores",
+            "📅 Montar Calendário Detalhado",
+            "🚍 Gestão de Viagens Itinerantes",
+            "⏰ Horários & Turmas",
+            "📊 Dashboard Consolidado",
+            "➕ Gestão de Localidades",
+        ]
+    )
+
+    with guia_quadro:
+        aba_quadro()
+    with guia_calendario:
+        aba_calendario()
+    with guia_viagens:
+        aba_viagens()
+    with guia_horarios:
+        aba_horarios()
+    with guia_relatorio:
+        aba_relatorio()
+    with guia_gestao:
+        aba_gestao()
+
+
+if __name__ == "__main__":
+    main()
