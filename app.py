@@ -29,6 +29,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+st.markdown('<meta name="google" content="notranslate">', unsafe_allow_html=True)
 # Estilização CSS Customizada
 st.markdown(
     """
