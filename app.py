@@ -1389,14 +1389,17 @@ def _ler_historico(conexao: sqlite3.Connection) -> dict[str, pd.DataFrame]:
 
 def _ler_mapa(conexao: sqlite3.Connection, tabela: str, coluna: str) -> dict[str, Any]:
     resultado = {}
-    for linha in conexao.execute(f"SELECT chave, {coluna} FROM {tabela}"):
-        valor = linha[coluna]
-        if coluna == "dias":
-            try:
-                valor = json.loads(valor)
-            except json.JSONDecodeError:
-                valor = []
-        resultado[linha["chave"]] = valor
+    try:
+        for linha in conexao.execute(f"SELECT chave, {coluna} FROM {tabela}"):
+            valor = linha[coluna]
+            if coluna == "dias":
+                try:
+                    valor = json.loads(valor)
+                except json.JSONDecodeError:
+                    valor = []
+            resultado[linha["chave"]] = valor
+    except sqlite3.OperationalError as e:
+        print(f"Aviso: Tabela '{tabela}' ou coluna '{coluna}' não encontrada no banco. Erro: {e}")
     return resultado
 
 
