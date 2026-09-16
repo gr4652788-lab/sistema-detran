@@ -74,7 +74,7 @@ except ImportError:
 # ===========================================================================
 
 SEPARADOR_CHAVE = "||"
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 MESES_LISTA = [
     "Janeiro",
@@ -229,6 +229,113 @@ BANCAS_APOIO_CONJUNTO = ["Banca Caxias", "Banca Timon"]
 BANCAS_COM_QUADRO_MATRIZ = ["Banca São Luís", "Banca Imperatriz"]
 BANCAS_COM_DISPONIBILIDADE_SEMANAL = ["Banca São Luís", "Banca Imperatriz"]
 
+# ---------------------------------------------------------------------------
+# Ajuste 3 — deslocamento das bancas itinerantes
+# ---------------------------------------------------------------------------
+# Minutos de deslocamento rodoviário ESTIMADOS a partir da sede da banca fixa
+# até cada município. São valores de referência (distância média por rodovia
+# convertida em tempo), não uma consulta em tempo real ao Google Maps — o
+# sistema não tem acesso à internet em produção. Cada valor pode ser corrigido
+# a qualquer momento no cadastro da viagem (o campo "minutos de deslocamento"
+# é editável e a correção fica salva para a próxima vez que a localidade for
+# usada), o que também cobre os casos em que uma banca atende um município
+# normalmente listado sob outra banca fixa.
+HORA_PARTIDA_PADRAO = datetime.time(8, 0)
+DURACAO_TURMA_MIN = 60
+DURACAO_ALMOCO_MIN = 60
+LIMITE_FIM_EXPEDIENTE = datetime.time(17, 0)
+
+TEMPO_DESLOCAMENTO_PADRAO_MIN: dict[str, dict[str, int]] = {
+    "Banca São Luís": {
+        # Sede e Região Metropolitana: sem deslocamento a calcular.
+        "São Luís Pátio": 0,
+        "São Luís Castelinho": 0,
+        "São Luís Cohatrac": 0,
+        "São Luís Cidade Operária": 0,
+        "Paço do Lumiar": 0,
+        "São José de Ribamar": 0,
+        "Raposa": 0,
+        # Itinerantes — estimativa rodoviária a partir de São Luís.
+        "Rosário": 60,
+        "Santa Rita": 75,
+        "Itapecuru-mirim": 90,
+        "Icatu": 120,
+        "Axixá": 120,
+        "Vitória do Mearim": 120,
+        "Arari": 120,
+        "Pinheiro": 120,
+        "São Bento": 90,
+        "Viana": 150,
+        "Cantanhede": 150,
+        "Coroatá": 150,
+        "Turilândia": 180,
+        "Codó": 240,
+        "Chapadinha": 210,
+        "Barreirinhas": 210,
+        "Brejo": 300,
+        "Tutóia": 300,
+        "Carutapera": 330,
+    },
+    "Banca Imperatriz": {
+        "Imperatriz": 0,
+        "João Lisboa": 20,
+        "Governador Edison Lobão": 30,
+        "Cidelândia": 40,
+        "Campestre do Maranhão": 60,
+        "Açailândia": 60,
+        "Estreito": 60,
+        "Porto Franco": 75,
+        "Itinga do Maranhão": 90,
+        "Amarante do Maranhão": 90,
+        "Alto Alegre do Maranhão": 120,
+        "Bom Jesus das Selvas": 120,
+        "Buriticupu": 150,
+        "Grajaú": 180,
+        "Balsas": 240,
+    },
+    "Banca Timon": {
+        "Timon - Pátio": 0,
+        "Matões": 60,
+        "Coelho Neto": 40,
+        "Caxias - Pátio": 120,
+        "Aldeias Altas": 140,
+        "São João do Sóter": 160,
+        "Buriti Bravo": 120,
+        "Colinas": 150,
+        "Passagem Franca": 150,
+        "Pastos Bons": 180,
+        "São João dos Patos": 180,
+        "Barra do Corda": 240,
+    },
+    "Banca Caxias": {
+        "Caxias - Pátio": 0,
+        "Aldeias Altas": 20,
+        "São João do Sóter": 40,
+        "Coelho Neto": 40,
+        "Buriti Bravo": 60,
+        "Codó - Regional": 60,
+    },
+    "Banca Bacabal": {
+        "Bacabal - Pátio": 0,
+        "Trizidela do Vale": 20,
+        "Pedreiras": 30,
+        "Olho d'Água das Cunhãs": 30,
+        "Lago da Pedra": 45,
+        "Vitorino Freire": 60,
+        "São Mateus do Maranhão": 60,
+        "Presidente Dutra": 60,
+        "Dom Pedro": 90,
+    },
+    "Banca Santa Inês": {
+        "Santa Inês - Pátio": 0,
+        "Pindaré-Mirim": 40,
+        "Monção": 60,
+        "Santa Luzia": 60,
+        "Viana": 90,
+        "Zé Doca": 90,
+    },
+}
+
 COLS_CATEGORIA = ["Cat A", "Cat B", "Cat C", "Cat D", "Cat E"]
 COLS_PCD = ["PCD A", "PCD B", "PCD C", "PCD D", "PCD E"]
 COLS_VAGAS = COLS_CATEGORIA + COLS_PCD
@@ -259,6 +366,16 @@ COR_CLARA = "#EDF2F7"
 COR_NEUTRA = "#718096"
 COR_ALERTA = "#E53E3E"
 COR_VIAGEM = "#2F855A"
+
+# Destaque das linhas já lançadas no editor de calendário (Ajuste 2).
+# Destaque das linhas já lançadas no editor de calendário (Ajuste 2) e do
+# alerta de deslocamento (Ajuste 3).
+COR_LANCADO_BG = "#C6F6D5"
+COR_LANCADO_TXT = "#22543D"
+COR_INATIVO_BG = "#E2E8F0"
+COR_INATIVO_TXT = "#4A5568"
+COR_ALERTA_DESLOC_BG = "#FED7D7"
+COR_ALERTA_DESLOC_TXT = "#822727"
 
 CSS_CUSTOMIZADO = """
 <style>
@@ -600,6 +717,95 @@ def periodo_do_horario(horario: str) -> str:
         LOG.warning("Horário inválido: %r — assumindo Manhã", horario)
         return TURNO_MANHA
     return TURNO_MANHA if (hora, minuto) < (12, 0) else TURNO_TARDE
+
+
+# --- Ajuste 3: sugestão de horário a partir do deslocamento -----------------
+def _hhmm_para_minutos(horario: str) -> int | None:
+    try:
+        hora, minuto = (int(p) for p in str(horario).split(":")[:2])
+        return hora * 60 + minuto
+    except (TypeError, ValueError):
+        return None
+
+
+def _minutos_para_horario(minutos: int) -> datetime.time:
+    minutos = max(0, min(int(minutos), 23 * 60 + 59))
+    return datetime.time(minutos // 60, minutos % 60)
+
+
+def tempo_deslocamento_padrao(banca: str, local: str) -> int:
+    """Minutos estimados de deslocamento da sede da banca até o local.
+
+    0 quando a localidade não precisa de deslocamento (sede, região
+    metropolitana) ou quando não há estimativa cadastrada para ela. Se o
+    local não está listado sob esta banca (situação de banca atendendo um
+    município que normalmente é de outra), reaproveita a estimativa de onde
+    ele costuma ser atendido — mas o valor final sempre pode ser corrigido
+    pelo usuário no cadastro da viagem.
+    """
+    direto = TEMPO_DESLOCAMENTO_PADRAO_MIN.get(banca, {}).get(local)
+    if direto is not None:
+        return direto
+    for mapa in TEMPO_DESLOCAMENTO_PADRAO_MIN.values():
+        if local in mapa:
+            return mapa[local]
+    return 0
+
+
+def horario_chegada_estimado(
+    minutos_deslocamento: int, partida: datetime.time = HORA_PARTIDA_PADRAO
+) -> datetime.time:
+    """Horário de chegada saindo da sede às `partida` mais o deslocamento."""
+    total = partida.hour * 60 + partida.minute + max(0, int(minutos_deslocamento))
+    return _minutos_para_horario(total)
+
+
+def sugerir_horario_inicio(
+    horarios_ativos: Sequence[str], chegada: datetime.time
+) -> str | None:
+    """Primeiro horário da grade que já acomoda a chegada estimada."""
+    chegada_min = chegada.hour * 60 + chegada.minute
+    candidatos = sorted(
+        (h for h in horarios_ativos if _hhmm_para_minutos(h) is not None),
+        key=lambda h: _hhmm_para_minutos(h),
+    )
+    for horario in candidatos:
+        if _hhmm_para_minutos(horario) >= chegada_min:
+            return horario
+    return None
+
+
+def horario_fim_turno(
+    horarios_ativos: Sequence[str], periodo: str
+) -> datetime.time | None:
+    """Horário estimado de término do turno, assumindo turmas de 1h."""
+    do_periodo = [h for h in horarios_ativos if periodo_do_horario(h) == periodo]
+    if not do_periodo:
+        return None
+    ultimo = max(do_periodo, key=lambda h: _hhmm_para_minutos(h))
+    return _minutos_para_horario(_hhmm_para_minutos(ultimo) + DURACAO_TURMA_MIN)
+
+
+def sugerir_horario_segunda_cidade(
+    horarios_ativos: Sequence[str],
+    fim_turno_cidade1: datetime.time,
+    deslocamento_entre_cidades_min: int,
+) -> tuple[str | None, datetime.time]:
+    """Sugestão de início na 2ª cidade da mesma viagem, no mesmo dia.
+
+    Conta o fim do turno da primeira cidade, mais 1h de almoço obrigatória,
+    mais o deslocamento entre as duas cidades. Devolve (horário sugerido na
+    grade, horário de chegada estimado) — o horário sugerido pode vir None se
+    a chegada estimada for depois do último horário cadastrado.
+    """
+    total = (
+        fim_turno_cidade1.hour * 60
+        + fim_turno_cidade1.minute
+        + DURACAO_ALMOCO_MIN
+        + max(0, int(deslocamento_entre_cidades_min))
+    )
+    chegada = _minutos_para_horario(total)
+    return sugerir_horario_inicio(horarios_ativos, chegada), chegada
 
 
 def viagens_ativas_no_periodo(
@@ -1007,6 +1213,11 @@ CREATE TABLE IF NOT EXISTS disponibilidade_semanal (
     chave TEXT PRIMARY KEY,
     valor INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS deslocamentos (
+    chave   TEXT PRIMARY KEY,
+    minutos INTEGER NOT NULL
+);
 """
 
 
@@ -1333,6 +1544,10 @@ def salvar_disponibilidade(dados: dict[str, int], forcar: bool = False) -> None:
     _salvar_mapa("disponibilidade_semanal", "valor", dados, "disponibilidade", forcar)
 
 
+def salvar_tempo_deslocamento(dados: dict[str, int], forcar: bool = False) -> None:
+    _salvar_mapa("deslocamentos", "minutos", dados, "deslocamentos", forcar)
+
+
 def remover_historico_do_local(banca: str, local: str) -> None:
     """Limpeza em cascata do histórico de uma localidade."""
     conexao = conectar()
@@ -1428,6 +1643,10 @@ def carregar_estado(forcar: bool = False) -> None:
             conexao, "disponibilidade_semanal", "valor"
         ).items()
     }
+    st.session_state["tempo_deslocamento_dict"] = {
+        chave: _inteiro(valor)
+        for chave, valor in _ler_mapa(conexao, "deslocamentos", "minutos").items()
+    }
 
     st.session_state["_assinaturas"] = {}
     _mudou("bancas", st.session_state["bancas_config"])
@@ -1441,6 +1660,7 @@ def carregar_estado(forcar: bool = False) -> None:
     _mudou("dias_permitidos", st.session_state["dias_permitidos_dict"])
     _mudou("feriados_locais", st.session_state["feriados_locais_dict"])
     _mudou("disponibilidade", st.session_state["disponibilidade_semanal"])
+    _mudou("deslocamentos", st.session_state["tempo_deslocamento_dict"])
     for chave, df in st.session_state["historico_localidades"].items():
         _mudou(f"historico:{chave}", df.to_dict(orient="records"))
 
@@ -1486,6 +1706,7 @@ def montar_backup() -> dict[str, Any]:
         "capacidade_bancas": st.session_state.get("capacidade_bancas", {}),
         "limite_fora_sede_bancas": st.session_state.get("limite_fora_sede_bancas", {}),
         "disponibilidade_semanal": st.session_state.get("disponibilidade_semanal", {}),
+        "tempo_deslocamento_dict": st.session_state.get("tempo_deslocamento_dict", {}),
         "controle_capacidade_ativo": st.session_state.get(
             "controle_capacidade_ativo", False
         ),
@@ -1612,6 +1833,10 @@ def aplicar_backup(dados: dict[str, Any]) -> None:
         chave: _inteiro(valor)
         for chave, valor in (dados.get("disponibilidade_semanal") or {}).items()
     }
+    st.session_state["tempo_deslocamento_dict"] = {
+        chave: _inteiro(valor)
+        for chave, valor in (dados.get("tempo_deslocamento_dict") or {}).items()
+    }
     st.session_state["controle_capacidade_ativo"] = bool(
         dados.get("controle_capacidade_ativo", False)
     )
@@ -1630,6 +1855,7 @@ def aplicar_backup(dados: dict[str, Any]) -> None:
     salvar_dias_permitidos(st.session_state["dias_permitidos_dict"], forcar=True)
     salvar_feriados_locais(st.session_state["feriados_locais_dict"], forcar=True)
     salvar_disponibilidade(st.session_state["disponibilidade_semanal"], forcar=True)
+    salvar_tempo_deslocamento(st.session_state["tempo_deslocamento_dict"], forcar=True)
     for chave, valor in (
         ("lista_horarios", st.session_state["lista_horarios"]),
         ("horarios_inativos", st.session_state["horarios_inativos"]),
@@ -1769,7 +1995,46 @@ def _ordenar_por_data(df: pd.DataFrame) -> pd.DataFrame:
     return copia.sort_values(["_ordem", "Horário"]).drop(columns=["_ordem"])
 
 
-# --- PDF: grade detalhada de uma localidade ---------------------------------
+# --- PDF: grade detalhada (linha a linha por horário) -----------------------
+COLUNAS_GRADE_DETALHADA = ["Data", "Dia da Semana", "Status", "Exam. M", "Exam. T", "Horário"]
+
+
+def _linhas_grade_detalhada(
+    df_filtrado: pd.DataFrame, pcd_usadas: list[str]
+) -> tuple[list[str], list[list[str]], list[int]]:
+    """Linha a linha por horário, com subtotal por data.
+
+    Compartilhada pelo PDF de uma única localidade e pelo PDF completo da
+    banca, para que os dois documentos tragam exatamente o mesmo nível de
+    detalhe — é o formato que os colaboradores usam para lançar no sistema.
+    Devolve (colunas, linhas, índices das linhas de subtotal a destacar).
+    """
+    numericas = COLS_CATEGORIA + pcd_usadas + ["Total"]
+    colunas = COLUNAS_GRADE_DETALHADA + COLS_CATEGORIA + pcd_usadas + ["Total"]
+
+    linhas: list[list[str]] = []
+    destaques: list[int] = []
+    for data_valor, grupo in df_filtrado.groupby("Data", sort=False):
+        for _, registro in grupo.iterrows():
+            linha = []
+            for coluna in colunas:
+                valor = registro.get(coluna, 0)
+                if coluna in numericas:
+                    linha.append(_texto_ou_traco(_num(valor)))
+                else:
+                    linha.append(html.escape(str(valor)))
+            linhas.append(linha)
+
+        subtotal = [f"TOTAL {data_valor}", "", "SUBTOTAL", "-", "-", "-"]
+        for coluna in COLS_CATEGORIA + pcd_usadas:
+            subtotal.append(_texto_ou_traco(int(grupo[coluna].fillna(0).sum())))
+        subtotal.append(str(int(grupo["Total"].fillna(0).sum())))
+        linhas.append(subtotal)
+        destaques.append(len(linhas))
+
+    return colunas, linhas, destaques
+
+
 def gerar_pdf_localidade(
     df_dados: pd.DataFrame, banca: str, local: str, mes: str, ano: int | str
 ) -> bytes:
@@ -1806,33 +2071,7 @@ def gerar_pdf_localidade(
         return buffer.getvalue()
 
     pcd_usadas = _colunas_com_valor(df_filtrado, COLS_PCD)
-    numericas = COLS_CATEGORIA + pcd_usadas + ["Total"]
-    colunas = (
-        ["Data", "Dia da Semana", "Status", "Exam. M", "Exam. T", "Horário"]
-        + COLS_CATEGORIA
-        + pcd_usadas
-        + ["Total"]
-    )
-
-    linhas: list[list[str]] = []
-    destaques: list[int] = []
-    for data_valor, grupo in df_filtrado.groupby("Data", sort=False):
-        for _, registro in grupo.iterrows():
-            linha = []
-            for coluna in colunas:
-                valor = registro.get(coluna, 0)
-                if coluna in numericas:
-                    linha.append(_texto_ou_traco(_num(valor)))
-                else:
-                    linha.append(html.escape(str(valor)))
-            linhas.append(linha)
-
-        subtotal = [f"TOTAL {data_valor}", "", "SUBTOTAL", "-", "-", "-"]
-        for coluna in COLS_CATEGORIA + pcd_usadas:
-            subtotal.append(_texto_ou_traco(int(grupo[coluna].fillna(0).sum())))
-        subtotal.append(str(int(grupo["Total"].fillna(0).sum())))
-        linhas.append(subtotal)
-        destaques.append(len(linhas))
+    colunas, linhas, destaques = _linhas_grade_detalhada(df_filtrado, pcd_usadas)
 
     tabela = Table([colunas] + linhas, repeatRows=1)
     tabela.setStyle(_estilo_tabela_padrao(destaques))
@@ -1842,31 +2081,6 @@ def gerar_pdf_localidade(
 
 
 # --- PDF: calendário consolidado da banca -----------------------------------
-def _resumo_por_data(df: pd.DataFrame, pcd_usadas: list[str]) -> list[list[str]]:
-    """Uma linha por data, com os horários agregados."""
-    linhas = []
-    for data_valor, grupo in _ordenar_por_data(df).groupby("Data", sort=False):
-        horarios = sorted({str(h) for h in grupo["Horário"]})
-        faixa = (
-            f"{horarios[0]}–{horarios[-1]} ({len(horarios)})"
-            if len(horarios) > 1
-            else (horarios[0] if horarios else "-")
-        )
-        linha = [
-            str(data_valor),
-            str(grupo["Dia da Semana"].iloc[0])[:3],
-            faixa,
-            str(
-                pico_diario(
-                    _num(grupo["Exam. M"].max()), _num(grupo["Exam. T"].max())
-                )
-            ),
-        ]
-        for coluna in COLS_CATEGORIA + pcd_usadas:
-            linha.append(_texto_ou_traco(int(grupo[coluna].fillna(0).sum())))
-        linha.append(str(int(grupo["Total"].fillna(0).sum())))
-        linhas.append(linha)
-    return linhas
 
 
 def gerar_pdf_banca(
@@ -1907,11 +2121,20 @@ def gerar_pdf_banca(
     grupo_atual = None
     total_geral = 0
     houve_conteudo = False
+    primeira_localidade = True
 
     for grupo, local in ordenadas:
-        df_local = _apenas_disponiveis(dados_por_local.get(local))
+        df_local_bruto = dados_por_local.get(local)
+        df_local = _ordenar_por_data(_apenas_disponiveis(df_local_bruto))
         if df_local.empty:
             continue
+
+        # Cada localidade começa em página nova: é o que permite entregar a
+        # grade de um município isoladamente para o colaborador responsável
+        # por lançar aquele calendário, sem recortar o PDF manualmente.
+        if not primeira_localidade:
+            elementos.append(PageBreak())
+        primeira_localidade = False
         houve_conteudo = True
 
         if grupo != grupo_atual:
@@ -1919,18 +2142,20 @@ def gerar_pdf_banca(
             grupo_atual = grupo
 
         pcd_usadas = _colunas_com_valor(df_local, COLS_PCD)
-        cabecalho = ["Data", "Dia", "Horários", "Exam."] + COLS_CATEGORIA + pcd_usadas + [
-            "Total"
-        ]
-        linhas = _resumo_por_data(df_local, pcd_usadas)
+        cabecalho, linhas, destaques = _linhas_grade_detalhada(df_local, pcd_usadas)
 
         total_local = int(df_local["Total"].fillna(0).sum())
         total_geral += total_local
-        rodape = ["TOTAL", "", "", ""]
+
+        # Uma linha de total geral da localidade, além dos subtotais por
+        # data: dá o resumo rápido sem perder o detalhe linha a linha.
+        rodape = [f"TOTAL GERAL — {local}".upper(), "", "", "-", "-", "-"]
         for coluna in COLS_CATEGORIA + pcd_usadas:
             rodape.append(_texto_ou_traco(int(df_local[coluna].fillna(0).sum())))
         rodape.append(str(total_local))
         linhas.append(rodape)
+        indice_total_geral = len(linhas)
+        destaques_relativos = destaques + [indice_total_geral]
 
         dias_unicos = sorted(
             {d.day for d in (para_data(x) for x in df_local["Data"].unique()) if d}
@@ -1945,12 +2170,20 @@ def gerar_pdf_banca(
             repeatRows=1,
             colWidths=_larguras_proporcionais(len(cabecalho)),
         )
-        tabela.setStyle(_estilo_tabela_padrao([len(linhas)]))
-        elementos.append(
-            KeepTogether(
-                [Paragraph(legenda, estilos["local"]), tabela, Spacer(1, 4)]
-            )
+        estilo_tabela = _estilo_tabela_padrao(destaques_relativos)
+        # A linha de total geral se destaca mais que os subtotais por data.
+        estilo_tabela.add(
+            "BACKGROUND",
+            (0, indice_total_geral),
+            (-1, indice_total_geral),
+            colors.HexColor(COR_SECUNDARIA),
         )
+        estilo_tabela.add(
+            "TEXTCOLOR", (0, indice_total_geral), (-1, indice_total_geral), colors.white
+        )
+        tabela.setStyle(estilo_tabela)
+        elementos.append(Paragraph(legenda, estilos["local"]))
+        elementos.append(tabela)
 
     if not houve_conteudo:
         elementos.append(
@@ -2945,8 +3178,60 @@ def _mesclar_com_historico(df_base: pd.DataFrame, chave: str) -> pd.DataFrame:
         registro["Exam. T"] = _num(antigo.get("Exam. T", 0))
         for coluna in COLS_VAGAS:
             registro[coluna] = _num(antigo.get(coluna, 0))
+        # Sem isto, o Total ficava zerado (herdado de df_base) até o editor
+        # rodar de novo — o alerta de deslocamento e o destaque verde (Ajustes
+        # 2 e 3) liam esse valor obsoleto assim que a página abria.
+        registro["Total"] = _num(antigo.get("Total", 0))
         linhas.append(registro)
     return pd.DataFrame(linhas, columns=df_base.columns)
+
+
+# Colunas desabilitadas no editor: são as únicas onde o Streamlit realmente
+# aplica a cor de fundo do Styler (a documentação do data_editor é explícita
+# quanto a isso — estilo em coluna editável é ignorado).
+_COLUNAS_DESTACAVEIS_EDITOR = ["Data", "Dia da Semana", "Horário", "Total"]
+
+
+def _cor_linha_calendario(linha: pd.Series, horario_minimo_min: int | None) -> str:
+    """Verde: já lançada. Vermelho: lançada antes do horário sugerido pelo
+    deslocamento (Ajuste 3). Cinza: bloqueada (feriado/indisponível)."""
+    if linha.get("Status") in STATUS_BLOQUEADOS:
+        return f"background-color: {COR_INATIVO_BG}; color: {COR_INATIVO_TXT};"
+    lancada = _num(linha.get("Total")) > 0
+    if lancada and horario_minimo_min is not None:
+        minutos_linha = _hhmm_para_minutos(str(linha.get("Horário", "")))
+        if minutos_linha is not None and minutos_linha < horario_minimo_min:
+            return (
+                f"background-color: {COR_ALERTA_DESLOC_BG};"
+                f" color: {COR_ALERTA_DESLOC_TXT}; font-weight: 600;"
+            )
+    if lancada:
+        return (
+            f"background-color: {COR_LANCADO_BG}; color: {COR_LANCADO_TXT};"
+            " font-weight: 600;"
+        )
+    return ""
+
+
+def _estilizar_grade_calendario(df: pd.DataFrame, horario_minimo_min: int | None = None):
+    """Aplica o destaque visual das linhas já preenchidas (Ajuste 2) e o
+    alerta de deslocamento (Ajuste 3).
+
+    O Streamlit só renderiza o estilo do pandas.Styler nas colunas
+    desabilitadas do data_editor; nas colunas editáveis (Status, Exam. M/T,
+    Cat A-E, PCD A-E) o estilo é ignorado silenciosamente. Por isso a cor é
+    aplicada só em Data/Dia da Semana/Horário/Total — o suficiente para criar
+    uma faixa verde bem visível em cada linha já lançada, sem quebrar a
+    edição das demais colunas.
+    """
+    if df.empty:
+        return df
+
+    def _aplicar(linha: pd.Series) -> list[str]:
+        estilo = _cor_linha_calendario(linha, horario_minimo_min)
+        return [estilo if col in _COLUNAS_DESTACAVEIS_EDITOR else "" for col in df.columns]
+
+    return df.style.apply(_aplicar, axis=1)
 
 
 def _calendario_visual(
@@ -3310,6 +3595,44 @@ def aba_calendario() -> None:
     else:
         df_exibicao = df_completo.copy()
 
+    # Ajuste 3 — alerta de deslocamento: linhas com vagas lançadas antes do
+    # horário em que a banca estimadamente chega ao município.
+    minutos_desloc = tempo_deslocamento_efetivo(banca, local)
+    horario_minimo_min = None
+    linhas_em_alerta = pd.DataFrame()
+    if minutos_desloc > 0:
+        chegada_estimada = horario_chegada_estimado(minutos_desloc)
+        horario_minimo_min = chegada_estimada.hour * 60 + chegada_estimada.minute
+        minutos_das_linhas = df_exibicao["Horário"].apply(_hhmm_para_minutos)
+        linhas_em_alerta = df_exibicao[
+            (df_exibicao["Total"] > 0)
+            & (df_exibicao["Status"] == STATUS_DISPONIVEL)
+            & minutos_das_linhas.notna()
+            & (minutos_das_linhas < horario_minimo_min)
+        ]
+
+    if not linhas_em_alerta.empty:
+        chave_ignorar = f"ignorar_alerta_desloc_{chave}"
+        if not st.session_state.get(chave_ignorar):
+            datas_em_alerta = ", ".join(
+                sorted(set(linhas_em_alerta["Data"]), key=lambda d: para_data(d) or datetime.date.max)
+            )
+            st.warning(
+                f"⚠️ {len(linhas_em_alerta)} horário(s) com vagas lançadas antes"
+                f" da chegada estimada ({chegada_estimada:%H:%M}) considerando o"
+                f" deslocamento até {local}: {datas_em_alerta}. As linhas ficam"
+                " destacadas em vermelho na grade abaixo — não é um bloqueio,"
+                " apenas um alerta."
+            )
+            if st.checkbox(
+                "Já verifiquei e quero manter estes horários assim mesmo",
+                key=f"chk_{chave_ignorar}",
+            ):
+                st.session_state[chave_ignorar] = True
+                st.rerun()
+
+    df_exibicao_estilizada = _estilizar_grade_calendario(df_exibicao, horario_minimo_min)
+
     configuracao = {
         "Data": st.column_config.TextColumn("Data", disabled=True),
         "Dia da Semana": st.column_config.TextColumn("Dia", disabled=True),
@@ -3340,12 +3663,17 @@ def aba_calendario() -> None:
         st.session_state[chave_assinatura] = assinatura
 
     df_editado = st.data_editor(
-        df_exibicao,
+        df_exibicao_estilizada,
         column_config=configuracao,
         **LARGURA_TOTAL,
         num_rows="fixed",
         height=450,
         key=chave_editor,
+    )
+    st.caption(
+        "🟩 Linha já lançada (com vagas) · 🟥 Lançada antes do horário sugerido"
+        " pelo deslocamento · ⬜ Bloqueada (feriado/indisponível) · sem cor ="
+        " ainda vazia."
     )
 
     # ``update`` ignora NaN: sem o fillna, apagar uma célula descartava a edição.
@@ -3508,6 +3836,156 @@ def _alertas_de_feriado(
     datas = datas_de_feriado_do_texto(texto, inicio.year)
     datas |= datas_de_feriado_do_texto(texto, fim.year)
     return sorted(d for d in datas if inicio <= d <= fim)
+
+
+def tempo_deslocamento_efetivo(banca: str, local: str) -> int:
+    """Minutos de deslocamento a usar: ajuste do usuário, senão a estimativa padrão."""
+    chave = chave_local(banca, local)
+    valor = st.session_state.get("tempo_deslocamento_dict", {}).get(chave)
+    return int(valor) if valor is not None else tempo_deslocamento_padrao(banca, local)
+
+
+def _painel_sugestao_deslocamento(
+    banca: str,
+    destino: str,
+    horarios_ativos: list[str],
+    trechos_da_equipe: list[Viagem],
+    data_inicio: datetime.date,
+    data_fim: datetime.date,
+    turno: str,
+) -> None:
+    """Mostra o horário sugerido de início considerando o deslocamento.
+
+    Cobre os dois cenários do Ajuste 3: (1) uma cidade só, deslocamento a
+    partir da sede da banca; (2) segunda cidade da mesma viagem no mesmo dia,
+    descontando 1h de almoço mais o deslocamento entre as duas cidades. Em
+    ambos os casos é só uma SUGESTÃO — nada aqui bloqueia o cadastro.
+    """
+    minutos_base = tempo_deslocamento_efetivo(banca, destino)
+    chave_desloc = chave_local(banca, destino)
+
+    if minutos_base <= 0:
+        st.caption(
+            f"📍 {destino}: sem deslocamento cadastrado (sede/região"
+            " metropolitana, ou sem estimativa — informe abaixo se precisar)."
+        )
+
+    with st.expander(f"🕒 Deslocamento até {destino}", expanded=minutos_base > 0):
+        novo_minutos = st.number_input(
+            "Minutos de deslocamento a partir da sede da banca (ajustável):",
+            min_value=0,
+            max_value=1440,
+            value=int(minutos_base),
+            step=5,
+            key=f"v_desloc_{chave_desloc}",
+            help=(
+                "Estimativa de referência — corrija aqui se souber o tempo real"
+                " de viagem; a correção fica salva para a próxima vez."
+            ),
+        )
+        if novo_minutos != minutos_base:
+            st.session_state.setdefault("tempo_deslocamento_dict", {})[
+                chave_desloc
+            ] = int(novo_minutos)
+            salvar_tempo_deslocamento(st.session_state["tempo_deslocamento_dict"])
+
+        if novo_minutos > 0:
+            chegada = horario_chegada_estimado(novo_minutos)
+            sugestao = sugerir_horario_inicio(horarios_ativos, chegada)
+            horas, minutos_resto = divmod(int(novo_minutos), 60)
+            duracao_txt = (
+                f"{horas}h{minutos_resto:02d}" if horas else f"{minutos_resto}min"
+            )
+            if sugestao:
+                st.info(
+                    f"Saindo às {HORA_PARTIDA_PADRAO:%H:%M} da sede, deslocamento de"
+                    f" ~{duracao_txt}, chegada estimada às {chegada:%H:%M}."
+                    f" **Sugestão: iniciar a primeira turma às {sugestao}.**"
+                )
+            else:
+                st.warning(
+                    f"Chegada estimada às {chegada:%H:%M} — depois do último"
+                    " horário cadastrado na grade. Considere iniciar o"
+                    " atendimento apenas no dia seguinte."
+                )
+
+    # Segunda cidade da mesma viagem, no mesmo dia — o caso de Pinheiro pela
+    # manhã e São Bento à tarde.
+    if data_fim < data_inicio:
+        return
+    dias_novos = set(dias_do_intervalo(data_inicio, data_fim))
+    for trecho in trechos_da_equipe:
+        if trecho.get("Destino") == destino:
+            continue
+        inicio_existente = para_data(trecho.get("Data Inicio"))
+        fim_existente = para_data(trecho.get("Data Fim"))
+        if not inicio_existente or not fim_existente:
+            continue
+        dias_comuns = sorted(
+            dias_novos & set(dias_do_intervalo(inicio_existente, fim_existente))
+        )
+        if not dias_comuns:
+            continue
+
+        dia_referencia = dias_comuns[0]
+        turno_existente = turno_da_viagem_no_dia(trecho, dia_referencia)
+        periodo_cidade1 = (
+            turno_existente if turno_existente in (TURNO_MANHA, TURNO_TARDE) else TURNO_MANHA
+        )
+        fim_turno1 = horario_fim_turno(horarios_ativos, periodo_cidade1)
+        if not fim_turno1:
+            continue
+
+        minutos_destino_existente = tempo_deslocamento_efetivo(
+            banca, trecho["Destino"]
+        )
+        chave_entre = f"v_desloc_entre_{chave_local(banca, destino)}_{chave_local(banca, trecho['Destino'])}"
+        deslocamento_padrao_entre = abs(minutos_base - minutos_destino_existente)
+
+        with st.expander(
+            f"🕒 Sequência no mesmo dia: {trecho['Destino']} → {destino}",
+            expanded=True,
+        ):
+            if turno_existente == TURNO_INTEGRAL:
+                st.caption(
+                    f"⚠️ {trecho['Destino']} ainda está marcado como"
+                    f" '{TURNO_INTEGRAL}' em {formatar_curto(dia_referencia)}."
+                    f" Para atender as duas cidades no mesmo dia, ajuste"
+                    f" {trecho['Destino']} para '{TURNO_MANHA}' no ajuste de"
+                    " turno por dia (assumindo manhã aqui para calcular)."
+                )
+            minutos_entre = st.number_input(
+                f"Deslocamento estimado entre {trecho['Destino']} e {destino}"
+                " (minutos):",
+                min_value=0,
+                max_value=600,
+                value=int(deslocamento_padrao_entre),
+                step=5,
+                key=chave_entre,
+                help=(
+                    "Sem uma rota exata entre as duas cidades, o padrão é a"
+                    " diferença entre os tempos de cada uma até a sede — ajuste"
+                    " se souber a distância real entre elas."
+                ),
+            )
+            sugestao2, chegada2 = sugerir_horario_segunda_cidade(
+                horarios_ativos, fim_turno1, minutos_entre
+            )
+            if sugestao2:
+                st.info(
+                    f"{trecho['Destino']} termina ~{fim_turno1:%H:%M} · +1h de"
+                    f" almoço · +{minutos_entre}min até {destino} → chegada"
+                    f" estimada às {chegada2:%H:%M}. **Sugestão: iniciar"
+                    f" {destino} às {sugestao2}"
+                    f" ({TURNO_TARDE if periodo_cidade1 == TURNO_MANHA else TURNO_MANHA}).**"
+                )
+            else:
+                st.warning(
+                    f"Chegada estimada às {chegada2:%H:%M} — depois do último"
+                    f" horário e do limite de {LIMITE_FIM_EXPEDIENTE:%H:%M}. Talvez"
+                    " não dê para atender as duas cidades no mesmo dia."
+                )
+        break  # um só bloco de sugestão, com o primeiro trecho que colide
 
 
 def _editor_turnos_por_dia(
@@ -3673,6 +4151,22 @@ def _formulario_cadastro_viagem() -> None:
                     for iso, valor in sorted(turnos_por_data.items())
                 )
             )
+
+    horarios_ativos = [
+        h
+        for h in st.session_state["lista_horarios"]
+        if h not in st.session_state["horarios_inativos"]
+    ]
+    trechos_da_equipe = [
+        v
+        for v in viagens
+        if v.get("Banca") == banca
+        and int(v.get("Numero Banca Itinerante", 0) or 0) == numero_equipe
+    ]
+    if horarios_ativos and data_fim >= data_inicio:
+        _painel_sugestao_deslocamento(
+            banca, destino, horarios_ativos, trechos_da_equipe, data_inicio, data_fim, turno
+        )
 
     examinadores_por_banca: dict[str, int] = {}
     participantes = bancas_para_validar(banca, bancas_apoio)
