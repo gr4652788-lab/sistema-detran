@@ -50,9 +50,7 @@ from openpyxl.styles import Alignment, Border, Font, Side
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4, landscape
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
-from reportlab.lib.units import mm
 from reportlab.platypus import (
-    KeepTogether,
     PageBreak,
     Paragraph,
     SimpleDocTemplate,
@@ -229,113 +227,6 @@ BANCAS_APOIO_CONJUNTO = ["Banca Caxias", "Banca Timon"]
 BANCAS_COM_QUADRO_MATRIZ = ["Banca São Luís", "Banca Imperatriz"]
 BANCAS_COM_DISPONIBILIDADE_SEMANAL = ["Banca São Luís", "Banca Imperatriz"]
 
-# ---------------------------------------------------------------------------
-# Ajuste 3 — deslocamento das bancas itinerantes
-# ---------------------------------------------------------------------------
-# Minutos de deslocamento rodoviário ESTIMADOS a partir da sede da banca fixa
-# até cada município. São valores de referência (distância média por rodovia
-# convertida em tempo), não uma consulta em tempo real ao Google Maps — o
-# sistema não tem acesso à internet em produção. Cada valor pode ser corrigido
-# a qualquer momento no cadastro da viagem (o campo "minutos de deslocamento"
-# é editável e a correção fica salva para a próxima vez que a localidade for
-# usada), o que também cobre os casos em que uma banca atende um município
-# normalmente listado sob outra banca fixa.
-HORA_PARTIDA_PADRAO = datetime.time(8, 0)
-DURACAO_TURMA_MIN = 60
-DURACAO_ALMOCO_MIN = 60
-LIMITE_FIM_EXPEDIENTE = datetime.time(17, 0)
-
-TEMPO_DESLOCAMENTO_PADRAO_MIN: dict[str, dict[str, int]] = {
-    "Banca São Luís": {
-        # Sede e Região Metropolitana: sem deslocamento a calcular.
-        "São Luís Pátio": 0,
-        "São Luís Castelinho": 0,
-        "São Luís Cohatrac": 0,
-        "São Luís Cidade Operária": 0,
-        "Paço do Lumiar": 0,
-        "São José de Ribamar": 0,
-        "Raposa": 0,
-        # Itinerantes — estimativa rodoviária a partir de São Luís.
-        "Rosário": 60,
-        "Santa Rita": 75,
-        "Itapecuru-mirim": 90,
-        "Icatu": 120,
-        "Axixá": 120,
-        "Vitória do Mearim": 120,
-        "Arari": 120,
-        "Pinheiro": 120,
-        "São Bento": 90,
-        "Viana": 150,
-        "Cantanhede": 150,
-        "Coroatá": 150,
-        "Turilândia": 180,
-        "Codó": 240,
-        "Chapadinha": 210,
-        "Barreirinhas": 210,
-        "Brejo": 300,
-        "Tutóia": 300,
-        "Carutapera": 330,
-    },
-    "Banca Imperatriz": {
-        "Imperatriz": 0,
-        "João Lisboa": 20,
-        "Governador Edison Lobão": 30,
-        "Cidelândia": 40,
-        "Campestre do Maranhão": 60,
-        "Açailândia": 60,
-        "Estreito": 60,
-        "Porto Franco": 75,
-        "Itinga do Maranhão": 90,
-        "Amarante do Maranhão": 90,
-        "Alto Alegre do Maranhão": 120,
-        "Bom Jesus das Selvas": 120,
-        "Buriticupu": 150,
-        "Grajaú": 180,
-        "Balsas": 240,
-    },
-    "Banca Timon": {
-        "Timon - Pátio": 0,
-        "Matões": 60,
-        "Coelho Neto": 40,
-        "Caxias - Pátio": 120,
-        "Aldeias Altas": 140,
-        "São João do Sóter": 160,
-        "Buriti Bravo": 120,
-        "Colinas": 150,
-        "Passagem Franca": 150,
-        "Pastos Bons": 180,
-        "São João dos Patos": 180,
-        "Barra do Corda": 240,
-    },
-    "Banca Caxias": {
-        "Caxias - Pátio": 0,
-        "Aldeias Altas": 20,
-        "São João do Sóter": 40,
-        "Coelho Neto": 40,
-        "Buriti Bravo": 60,
-        "Codó - Regional": 60,
-    },
-    "Banca Bacabal": {
-        "Bacabal - Pátio": 0,
-        "Trizidela do Vale": 20,
-        "Pedreiras": 30,
-        "Olho d'Água das Cunhãs": 30,
-        "Lago da Pedra": 45,
-        "Vitorino Freire": 60,
-        "São Mateus do Maranhão": 60,
-        "Presidente Dutra": 60,
-        "Dom Pedro": 90,
-    },
-    "Banca Santa Inês": {
-        "Santa Inês - Pátio": 0,
-        "Pindaré-Mirim": 40,
-        "Monção": 60,
-        "Santa Luzia": 60,
-        "Viana": 90,
-        "Zé Doca": 90,
-    },
-}
-
 COLS_CATEGORIA = ["Cat A", "Cat B", "Cat C", "Cat D", "Cat E"]
 COLS_PCD = ["PCD A", "PCD B", "PCD C", "PCD D", "PCD E"]
 COLS_VAGAS = COLS_CATEGORIA + COLS_PCD
@@ -367,15 +258,12 @@ COR_NEUTRA = "#718096"
 COR_ALERTA = "#E53E3E"
 COR_VIAGEM = "#2F855A"
 
-# Destaque das linhas já lançadas no editor de calendário (Ajuste 2).
-# Destaque das linhas já lançadas no editor de calendário (Ajuste 2) e do
-# alerta de deslocamento (Ajuste 3).
+# Destaque das linhas já lançadas no editor de calendário: verde para linha
+# com vagas, cinza para bloqueada (feriado/indisponível).
 COR_LANCADO_BG = "#C6F6D5"
 COR_LANCADO_TXT = "#22543D"
 COR_INATIVO_BG = "#E2E8F0"
 COR_INATIVO_TXT = "#4A5568"
-COR_ALERTA_DESLOC_BG = "#FED7D7"
-COR_ALERTA_DESLOC_TXT = "#822727"
 
 CSS_CUSTOMIZADO = """
 <style>
@@ -717,95 +605,6 @@ def periodo_do_horario(horario: str) -> str:
         LOG.warning("Horário inválido: %r — assumindo Manhã", horario)
         return TURNO_MANHA
     return TURNO_MANHA if (hora, minuto) < (12, 0) else TURNO_TARDE
-
-
-# --- Ajuste 3: sugestão de horário a partir do deslocamento -----------------
-def _hhmm_para_minutos(horario: str) -> int | None:
-    try:
-        hora, minuto = (int(p) for p in str(horario).split(":")[:2])
-        return hora * 60 + minuto
-    except (TypeError, ValueError):
-        return None
-
-
-def _minutos_para_horario(minutos: int) -> datetime.time:
-    minutos = max(0, min(int(minutos), 23 * 60 + 59))
-    return datetime.time(minutos // 60, minutos % 60)
-
-
-def tempo_deslocamento_padrao(banca: str, local: str) -> int:
-    """Minutos estimados de deslocamento da sede da banca até o local.
-
-    0 quando a localidade não precisa de deslocamento (sede, região
-    metropolitana) ou quando não há estimativa cadastrada para ela. Se o
-    local não está listado sob esta banca (situação de banca atendendo um
-    município que normalmente é de outra), reaproveita a estimativa de onde
-    ele costuma ser atendido — mas o valor final sempre pode ser corrigido
-    pelo usuário no cadastro da viagem.
-    """
-    direto = TEMPO_DESLOCAMENTO_PADRAO_MIN.get(banca, {}).get(local)
-    if direto is not None:
-        return direto
-    for mapa in TEMPO_DESLOCAMENTO_PADRAO_MIN.values():
-        if local in mapa:
-            return mapa[local]
-    return 0
-
-
-def horario_chegada_estimado(
-    minutos_deslocamento: int, partida: datetime.time = HORA_PARTIDA_PADRAO
-) -> datetime.time:
-    """Horário de chegada saindo da sede às `partida` mais o deslocamento."""
-    total = partida.hour * 60 + partida.minute + max(0, int(minutos_deslocamento))
-    return _minutos_para_horario(total)
-
-
-def sugerir_horario_inicio(
-    horarios_ativos: Sequence[str], chegada: datetime.time
-) -> str | None:
-    """Primeiro horário da grade que já acomoda a chegada estimada."""
-    chegada_min = chegada.hour * 60 + chegada.minute
-    candidatos = sorted(
-        (h for h in horarios_ativos if _hhmm_para_minutos(h) is not None),
-        key=lambda h: _hhmm_para_minutos(h),
-    )
-    for horario in candidatos:
-        if _hhmm_para_minutos(horario) >= chegada_min:
-            return horario
-    return None
-
-
-def horario_fim_turno(
-    horarios_ativos: Sequence[str], periodo: str
-) -> datetime.time | None:
-    """Horário estimado de término do turno, assumindo turmas de 1h."""
-    do_periodo = [h for h in horarios_ativos if periodo_do_horario(h) == periodo]
-    if not do_periodo:
-        return None
-    ultimo = max(do_periodo, key=lambda h: _hhmm_para_minutos(h))
-    return _minutos_para_horario(_hhmm_para_minutos(ultimo) + DURACAO_TURMA_MIN)
-
-
-def sugerir_horario_segunda_cidade(
-    horarios_ativos: Sequence[str],
-    fim_turno_cidade1: datetime.time,
-    deslocamento_entre_cidades_min: int,
-) -> tuple[str | None, datetime.time]:
-    """Sugestão de início na 2ª cidade da mesma viagem, no mesmo dia.
-
-    Conta o fim do turno da primeira cidade, mais 1h de almoço obrigatória,
-    mais o deslocamento entre as duas cidades. Devolve (horário sugerido na
-    grade, horário de chegada estimado) — o horário sugerido pode vir None se
-    a chegada estimada for depois do último horário cadastrado.
-    """
-    total = (
-        fim_turno_cidade1.hour * 60
-        + fim_turno_cidade1.minute
-        + DURACAO_ALMOCO_MIN
-        + max(0, int(deslocamento_entre_cidades_min))
-    )
-    chegada = _minutos_para_horario(total)
-    return sugerir_horario_inicio(horarios_ativos, chegada), chegada
 
 
 def viagens_ativas_no_periodo(
@@ -1213,11 +1012,6 @@ CREATE TABLE IF NOT EXISTS disponibilidade_semanal (
     chave TEXT PRIMARY KEY,
     valor INTEGER NOT NULL
 );
-
-CREATE TABLE IF NOT EXISTS deslocamentos (
-    chave   TEXT PRIMARY KEY,
-    minutos INTEGER NOT NULL
-);
 """
 
 
@@ -1286,13 +1080,24 @@ def _assinatura(valor: Any) -> str:
 
 
 def _mudou(nome: str, valor: Any) -> bool:
-    """Evita reescrever o banco a cada clique de widget."""
+    """Só verifica se o conteúdo mudou — não marca nada como salvo.
+
+    A confirmação de que os dados foram de fato persistidos é feita à
+    parte, por `_confirmar_salvo`, e só deve acontecer depois que a
+    gravação no banco tiver sucesso. Antes, `_mudou` já marcava a
+    assinatura como "salva" antes mesmo de tentar gravar: se a gravação
+    falhasse (disco cheio, banco bloqueado por outro processo etc.), o
+    sistema passava a acreditar que aquele conteúdo já estava seguro no
+    banco, e uma nova tentativa com o mesmo conteúdo era silenciosamente
+    pulada — sem avisar que os dados nunca chegaram a ser salvos de verdade.
+    """
     assinaturas = st.session_state.setdefault("_assinaturas", {})
-    nova = _assinatura(valor)
-    if assinaturas.get(nome) == nova:
-        return False
-    assinaturas[nome] = nova
-    return True
+    return assinaturas.get(nome) != _assinatura(valor)
+
+
+def _confirmar_salvo(nome: str, valor: Any) -> None:
+    """Registra que este conteúdo foi gravado com sucesso no banco."""
+    st.session_state.setdefault("_assinaturas", {})[nome] = _assinatura(valor)
 
 
 def _registrar_erro(mensagem: str, excecao: Exception) -> None:
@@ -1389,17 +1194,14 @@ def _ler_historico(conexao: sqlite3.Connection) -> dict[str, pd.DataFrame]:
 
 def _ler_mapa(conexao: sqlite3.Connection, tabela: str, coluna: str) -> dict[str, Any]:
     resultado = {}
-    try:
-        for linha in conexao.execute(f"SELECT chave, {coluna} FROM {tabela}"):
-            valor = linha[coluna]
-            if coluna == "dias":
-                try:
-                    valor = json.loads(valor)
-                except json.JSONDecodeError:
-                    valor = []
-            resultado[linha["chave"]] = valor
-    except sqlite3.OperationalError as e:
-        print(f"Aviso: Tabela '{tabela}' ou coluna '{coluna}' não encontrada no banco. Erro: {e}")
+    for linha in conexao.execute(f"SELECT chave, {coluna} FROM {tabela}"):
+        valor = linha[coluna]
+        if coluna == "dias":
+            try:
+                valor = json.loads(valor)
+            except json.JSONDecodeError:
+                valor = []
+        resultado[linha["chave"]] = valor
     return resultado
 
 
@@ -1407,8 +1209,8 @@ def _ler_mapa(conexao: sqlite3.Connection, tabela: str, coluna: str) -> dict[str
 def salvar_config(chave: str, valor: Any, forcar: bool = False) -> None:
     if not forcar and not _mudou(f"config:{chave}", valor):
         return
-    conexao = conectar()
     try:
+        conexao = conectar()
         with _LOCK, conexao:
             conexao.execute(
                 "INSERT INTO config (chave, valor, atualizado_em) VALUES (?, ?, ?) "
@@ -1416,6 +1218,7 @@ def salvar_config(chave: str, valor: Any, forcar: bool = False) -> None:
                 "atualizado_em = excluded.atualizado_em",
                 (chave, _dump(valor), datetime.datetime.now().isoformat()),
             )
+        _confirmar_salvo(f"config:{chave}", valor)
         _marcar_sucesso()
     except Exception as erro:
         _registrar_erro(f"Falha ao salvar a configuração '{chave}'", erro)
@@ -1424,8 +1227,8 @@ def salvar_config(chave: str, valor: Any, forcar: bool = False) -> None:
 def salvar_bancas(bancas_config: dict[str, list[str]], forcar: bool = False) -> None:
     if not forcar and not _mudou("bancas", bancas_config):
         return
-    conexao = conectar()
     try:
+        conexao = conectar()
         with _LOCK, conexao:
             conexao.execute("DELETE FROM bancas")
             conexao.execute("DELETE FROM localidades")
@@ -1438,6 +1241,7 @@ def salvar_bancas(bancas_config: dict[str, list[str]], forcar: bool = False) -> 
                     "INSERT INTO localidades (banca, nome, ordem) VALUES (?, ?, ?)",
                     [(banca, local, i) for i, local in enumerate(locais)],
                 )
+        _confirmar_salvo("bancas", bancas_config)
         _marcar_sucesso()
     except Exception as erro:
         _registrar_erro("Falha ao salvar bancas e localidades", erro)
@@ -1447,8 +1251,8 @@ def salvar_viagens(viagens: list[Viagem], forcar: bool = False) -> None:
     comparavel = [{k: v for k, v in viagem.items() if k != "id"} for viagem in viagens]
     if not forcar and not _mudou("viagens", comparavel):
         return
-    conexao = conectar()
     try:
+        conexao = conectar()
         with _LOCK, conexao:
             conexao.execute("DELETE FROM viagens")
             for viagem in viagens:
@@ -1472,35 +1276,76 @@ def salvar_viagens(viagens: list[Viagem], forcar: bool = False) -> None:
                     ),
                 )
                 viagem["id"] = cursor.lastrowid
+        _confirmar_salvo("viagens", comparavel)
         _marcar_sucesso()
     except Exception as erro:
         _registrar_erro("Falha ao salvar as viagens", erro)
 
 
 def salvar_historico(chave: str, df: pd.DataFrame, forcar: bool = False) -> None:
+    """Grava as linhas informadas por upsert, sem apagar outras linhas da
+    mesma chave que não estejam neste DataFrame.
+
+    Correção de um bug de perda de dados: o calendário exibido em tela é
+    sempre RECONSTRUÍDO a partir dos parâmetros atuais (dias da semana
+    selecionados, horários ativos, feriados). Como o Streamlit reexecuta o
+    script inteiro a cada interação — mesmo uma em outra aba —, qualquer
+    mudança nesses parâmetros (ainda que temporária ou em outra tela) faz
+    essa reconstrução gerar menos linhas para a localidade que está
+    selecionada na barra lateral do calendário. Um DELETE seguido de INSERT
+    aqui apagaria do banco, para sempre, os lançamentos que ficaram de fora
+    da reconstrução daquele instante. Por isso cada linha é gravada com
+    upsert (INSERT ... ON CONFLICT DO UPDATE): o que não está neste
+    DataFrame simplesmente não é tocado, e volta a aparecer se os
+    parâmetros voltarem ao que eram.
+
+    Para substituir integralmente o conteúdo de uma chave (restauração de
+    backup), use `substituir_historico`.
+    """
     if df is None or df.empty:
         return
     registros = df.to_dict(orient="records")
     if not forcar and not _mudou(f"historico:{chave}", registros):
         return
-    conexao = conectar()
     try:
-        linhas = []
-        for registro in registros:
-            vagas = {c: _inteiro(registro.get(c, 0)) for c in COLS_VAGAS}
-            linhas.append(
-                (
-                    chave,
-                    str(registro.get("Data", "")),
-                    str(registro.get("Horário", "")),
-                    str(registro.get("Dia da Semana", "")),
-                    str(registro.get("Status", STATUS_DISPONIVEL)),
-                    _inteiro(registro.get("Exam. M")),
-                    _inteiro(registro.get("Exam. T")),
-                    _dump(vagas),
-                    _inteiro(registro.get("Total")),
-                )
+        conexao = conectar()
+        linhas = _linhas_historico_para_gravar(chave, registros)
+        with _LOCK, conexao:
+            conexao.executemany(
+                "INSERT INTO historico (chave, data, horario, dia_semana, status,"
+                " exam_m, exam_t, vagas, total)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                " ON CONFLICT(chave, data, horario) DO UPDATE SET"
+                " dia_semana = excluded.dia_semana,"
+                " status = excluded.status,"
+                " exam_m = excluded.exam_m,"
+                " exam_t = excluded.exam_t,"
+                " vagas = excluded.vagas,"
+                " total = excluded.total",
+                linhas,
             )
+        _confirmar_salvo(f"historico:{chave}", registros)
+        _marcar_sucesso()
+    except Exception as erro:
+        _registrar_erro(f"Falha ao salvar o calendário '{chave}'", erro)
+
+
+def substituir_historico(chave: str, df: pd.DataFrame, forcar: bool = False) -> None:
+    """Substitui integralmente as linhas de uma chave (apaga e regrava tudo).
+
+    Ao contrário de `salvar_historico`, aqui a substituição total é o
+    comportamento correto: usado apenas na restauração de backup, onde a
+    intenção explícita do usuário é fazer o banco voltar a ser exatamente
+    o que está no arquivo — inclusive removendo linhas que não constam nele.
+    """
+    if df is None or df.empty:
+        return
+    registros = df.to_dict(orient="records")
+    if not forcar and not _mudou(f"historico:{chave}", registros):
+        return
+    try:
+        conexao = conectar()
+        linhas = _linhas_historico_para_gravar(chave, registros)
         with _LOCK, conexao:
             conexao.execute("DELETE FROM historico WHERE chave = ?", (chave,))
             conexao.executemany(
@@ -1509,9 +1354,32 @@ def salvar_historico(chave: str, df: pd.DataFrame, forcar: bool = False) -> None
                 " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 linhas,
             )
+        _confirmar_salvo(f"historico:{chave}", registros)
         _marcar_sucesso()
     except Exception as erro:
-        _registrar_erro(f"Falha ao salvar o calendário '{chave}'", erro)
+        _registrar_erro(f"Falha ao substituir o calendário '{chave}'", erro)
+
+
+def _linhas_historico_para_gravar(
+    chave: str, registros: list[dict[str, Any]]
+) -> list[tuple]:
+    linhas = []
+    for registro in registros:
+        vagas = {c: _inteiro(registro.get(c, 0)) for c in COLS_VAGAS}
+        linhas.append(
+            (
+                chave,
+                str(registro.get("Data", "")),
+                str(registro.get("Horário", "")),
+                str(registro.get("Dia da Semana", "")),
+                str(registro.get("Status", STATUS_DISPONIVEL)),
+                _inteiro(registro.get("Exam. M")),
+                _inteiro(registro.get("Exam. T")),
+                _dump(vagas),
+                _inteiro(registro.get("Total")),
+            )
+        )
+    return linhas
 
 
 def _salvar_mapa(
@@ -1519,8 +1387,8 @@ def _salvar_mapa(
 ) -> None:
     if not forcar and not _mudou(nome_cache, dados):
         return
-    conexao = conectar()
     try:
+        conexao = conectar()
         with _LOCK, conexao:
             conexao.execute(f"DELETE FROM {tabela}")
             conexao.executemany(
@@ -1530,6 +1398,7 @@ def _salvar_mapa(
                     for chave, valor in dados.items()
                 ],
             )
+        _confirmar_salvo(nome_cache, dados)
         _marcar_sucesso()
     except Exception as erro:
         _registrar_erro(f"Falha ao salvar a tabela '{tabela}'", erro)
@@ -1547,13 +1416,8 @@ def salvar_disponibilidade(dados: dict[str, int], forcar: bool = False) -> None:
     _salvar_mapa("disponibilidade_semanal", "valor", dados, "disponibilidade", forcar)
 
 
-def salvar_tempo_deslocamento(dados: dict[str, int], forcar: bool = False) -> None:
-    _salvar_mapa("deslocamentos", "minutos", dados, "deslocamentos", forcar)
-
-
 def remover_historico_do_local(banca: str, local: str) -> None:
     """Limpeza em cascata do histórico de uma localidade."""
-    conexao = conectar()
     alvos = [
         chave
         for chave in st.session_state.get("historico_localidades", {})
@@ -1562,6 +1426,7 @@ def remover_historico_do_local(banca: str, local: str) -> None:
         and partes[3] == local
     ]
     try:
+        conexao = conectar()
         with _LOCK, conexao:
             for chave in alvos:
                 conexao.execute("DELETE FROM historico WHERE chave = ?", (chave,))
@@ -1646,26 +1511,23 @@ def carregar_estado(forcar: bool = False) -> None:
             conexao, "disponibilidade_semanal", "valor"
         ).items()
     }
-    st.session_state["tempo_deslocamento_dict"] = {
-        chave: _inteiro(valor)
-        for chave, valor in _ler_mapa(conexao, "deslocamentos", "minutos").items()
-    }
 
     st.session_state["_assinaturas"] = {}
-    _mudou("bancas", st.session_state["bancas_config"])
-    _mudou(
+    # Semeia o cache de "já salvo" com o que acabou de ser lido do banco —
+    # não é `_mudou` (que só verifica), é `_confirmar_salvo` (que registra).
+    _confirmar_salvo("bancas", st.session_state["bancas_config"])
+    _confirmar_salvo(
         "viagens",
         [
             {k: v for k, v in viagem.items() if k != "id"}
             for viagem in st.session_state["viagens_registradas"]
         ],
     )
-    _mudou("dias_permitidos", st.session_state["dias_permitidos_dict"])
-    _mudou("feriados_locais", st.session_state["feriados_locais_dict"])
-    _mudou("disponibilidade", st.session_state["disponibilidade_semanal"])
-    _mudou("deslocamentos", st.session_state["tempo_deslocamento_dict"])
+    _confirmar_salvo("dias_permitidos", st.session_state["dias_permitidos_dict"])
+    _confirmar_salvo("feriados_locais", st.session_state["feriados_locais_dict"])
+    _confirmar_salvo("disponibilidade", st.session_state["disponibilidade_semanal"])
     for chave, df in st.session_state["historico_localidades"].items():
-        _mudou(f"historico:{chave}", df.to_dict(orient="records"))
+        _confirmar_salvo(f"historico:{chave}", df.to_dict(orient="records"))
 
     st.session_state["_estado_carregado"] = True
     st.session_state.setdefault("erro_persistencia", None)
@@ -1709,7 +1571,6 @@ def montar_backup() -> dict[str, Any]:
         "capacidade_bancas": st.session_state.get("capacidade_bancas", {}),
         "limite_fora_sede_bancas": st.session_state.get("limite_fora_sede_bancas", {}),
         "disponibilidade_semanal": st.session_state.get("disponibilidade_semanal", {}),
-        "tempo_deslocamento_dict": st.session_state.get("tempo_deslocamento_dict", {}),
         "controle_capacidade_ativo": st.session_state.get(
             "controle_capacidade_ativo", False
         ),
@@ -1813,6 +1674,25 @@ def _migrar_viagem_antiga(viagem: dict[str, Any]) -> Viagem:
     return convertida
 
 
+def _rodar_salvamento_do_backup(erros: list[str], funcao, *args, **kwargs) -> None:
+    """Executa uma função de gravação e acumula o erro, se houver, sem
+    deixar que uma gravação seguinte bem-sucedida apague o aviso.
+
+    As funções `salvar_*` capturam suas próprias exceções para que uma
+    falha pontual não derrube o restante do app em uso normal — mas isso
+    significa que `_marcar_sucesso()` de uma chamada seguinte reseta
+    `erro_persistencia` para `None`, mascarando a falha de uma chamada
+    anterior. Durante a restauração de um backup, várias gravações
+    acontecem em sequência, então cada uma precisa ser conferida
+    individualmente.
+    """
+    st.session_state["erro_persistencia"] = None
+    funcao(*args, **kwargs)
+    erro = st.session_state.get("erro_persistencia")
+    if erro:
+        erros.append(erro)
+
+
 def aplicar_backup(dados: dict[str, Any]) -> None:
     validar_backup(dados)
     salvar_snapshot(motivo="antes_de_restaurar")
@@ -1836,10 +1716,6 @@ def aplicar_backup(dados: dict[str, Any]) -> None:
         chave: _inteiro(valor)
         for chave, valor in (dados.get("disponibilidade_semanal") or {}).items()
     }
-    st.session_state["tempo_deslocamento_dict"] = {
-        chave: _inteiro(valor)
-        for chave, valor in (dados.get("tempo_deslocamento_dict") or {}).items()
-    }
     st.session_state["controle_capacidade_ativo"] = bool(
         dados.get("controle_capacidade_ativo", False)
     )
@@ -1853,12 +1729,31 @@ def aplicar_backup(dados: dict[str, Any]) -> None:
     }
 
     st.session_state["_assinaturas"] = {}
-    salvar_bancas(st.session_state["bancas_config"], forcar=True)
-    salvar_viagens(st.session_state["viagens_registradas"], forcar=True)
-    salvar_dias_permitidos(st.session_state["dias_permitidos_dict"], forcar=True)
-    salvar_feriados_locais(st.session_state["feriados_locais_dict"], forcar=True)
-    salvar_disponibilidade(st.session_state["disponibilidade_semanal"], forcar=True)
-    salvar_tempo_deslocamento(st.session_state["tempo_deslocamento_dict"], forcar=True)
+    erros: list[str] = []
+    _rodar_salvamento_do_backup(
+        erros, salvar_bancas, st.session_state["bancas_config"], forcar=True
+    )
+    _rodar_salvamento_do_backup(
+        erros, salvar_viagens, st.session_state["viagens_registradas"], forcar=True
+    )
+    _rodar_salvamento_do_backup(
+        erros,
+        salvar_dias_permitidos,
+        st.session_state["dias_permitidos_dict"],
+        forcar=True,
+    )
+    _rodar_salvamento_do_backup(
+        erros,
+        salvar_feriados_locais,
+        st.session_state["feriados_locais_dict"],
+        forcar=True,
+    )
+    _rodar_salvamento_do_backup(
+        erros,
+        salvar_disponibilidade,
+        st.session_state["disponibilidade_semanal"],
+        forcar=True,
+    )
     for chave, valor in (
         ("lista_horarios", st.session_state["lista_horarios"]),
         ("horarios_inativos", st.session_state["horarios_inativos"]),
@@ -1866,9 +1761,17 @@ def aplicar_backup(dados: dict[str, Any]) -> None:
         ("limite_fora_sede_bancas", st.session_state["limite_fora_sede_bancas"]),
         ("controle_capacidade_ativo", st.session_state["controle_capacidade_ativo"]),
     ):
-        salvar_config(chave, valor, forcar=True)
+        _rodar_salvamento_do_backup(erros, salvar_config, chave, valor, forcar=True)
     for chave, df in st.session_state["historico_localidades"].items():
-        salvar_historico(chave, df, forcar=True)
+        _rodar_salvamento_do_backup(erros, substituir_historico, chave, df, forcar=True)
+
+    if erros:
+        mensagem = (
+            "O backup foi carregado na tela, mas parte dos dados não foi"
+            " gravada no banco: " + "; ".join(erros)
+        )
+        st.session_state["erro_persistencia"] = mensagem
+        raise RuntimeError(mensagem)
 
 
 def salvar_snapshot(motivo: str = "manual") -> Path | None:
@@ -3182,11 +3085,33 @@ def _mesclar_com_historico(df_base: pd.DataFrame, chave: str) -> pd.DataFrame:
         for coluna in COLS_VAGAS:
             registro[coluna] = _num(antigo.get(coluna, 0))
         # Sem isto, o Total ficava zerado (herdado de df_base) até o editor
-        # rodar de novo — o alerta de deslocamento e o destaque verde (Ajustes
-        # 2 e 3) liam esse valor obsoleto assim que a página abria.
+        # rodar de novo — o destaque verde (Ajuste 2) lia esse valor obsoleto
+        # assim que a página abria.
         registro["Total"] = _num(antigo.get("Total", 0))
         linhas.append(registro)
     return pd.DataFrame(linhas, columns=df_base.columns)
+
+
+def _mesclar_no_estado_em_memoria(chave: str, df_completo: pd.DataFrame) -> None:
+    """Atualiza o histórico em memória sem apagar linhas que ficaram de fora
+    da reconstrução atual da grade.
+
+    Espelha, no `session_state`, a mesma proteção contra perda de dados que
+    `salvar_historico` aplica no banco: se uma mudança de parâmetro (dia da
+    semana, horário, feriado) reduzir temporariamente as linhas geradas para
+    esta localidade, as linhas antigas continuam disponíveis para o
+    dashboard e os PDFs dentro da mesma sessão, em vez de sumirem até a
+    próxima recarga da página.
+    """
+    historico = st.session_state["historico_localidades"]
+    antigo = historico.get(chave)
+    if antigo is None or antigo.empty:
+        historico[chave] = df_completo
+        return
+    combinado = pd.concat([antigo, df_completo], ignore_index=True)
+    historico[chave] = combinado.drop_duplicates(
+        subset=["Data", "Horário"], keep="last"
+    ).reset_index(drop=True)
 
 
 # Colunas desabilitadas no editor: são as únicas onde o Streamlit realmente
@@ -3195,20 +3120,12 @@ def _mesclar_com_historico(df_base: pd.DataFrame, chave: str) -> pd.DataFrame:
 _COLUNAS_DESTACAVEIS_EDITOR = ["Data", "Dia da Semana", "Horário", "Total"]
 
 
-def _cor_linha_calendario(linha: pd.Series, horario_minimo_min: int | None) -> str:
-    """Verde: já lançada. Vermelho: lançada antes do horário sugerido pelo
-    deslocamento (Ajuste 3). Cinza: bloqueada (feriado/indisponível)."""
+def _cor_linha_calendario(linha: pd.Series) -> str:
+    """Verde: linha já lançada (com vagas). Cinza: bloqueada
+    (feriado/indisponível). Sem cor: ainda vazia."""
     if linha.get("Status") in STATUS_BLOQUEADOS:
         return f"background-color: {COR_INATIVO_BG}; color: {COR_INATIVO_TXT};"
-    lancada = _num(linha.get("Total")) > 0
-    if lancada and horario_minimo_min is not None:
-        minutos_linha = _hhmm_para_minutos(str(linha.get("Horário", "")))
-        if minutos_linha is not None and minutos_linha < horario_minimo_min:
-            return (
-                f"background-color: {COR_ALERTA_DESLOC_BG};"
-                f" color: {COR_ALERTA_DESLOC_TXT}; font-weight: 600;"
-            )
-    if lancada:
+    if _num(linha.get("Total")) > 0:
         return (
             f"background-color: {COR_LANCADO_BG}; color: {COR_LANCADO_TXT};"
             " font-weight: 600;"
@@ -3216,9 +3133,8 @@ def _cor_linha_calendario(linha: pd.Series, horario_minimo_min: int | None) -> s
     return ""
 
 
-def _estilizar_grade_calendario(df: pd.DataFrame, horario_minimo_min: int | None = None):
-    """Aplica o destaque visual das linhas já preenchidas (Ajuste 2) e o
-    alerta de deslocamento (Ajuste 3).
+def _estilizar_grade_calendario(df: pd.DataFrame):
+    """Aplica o destaque visual das linhas já preenchidas.
 
     O Streamlit só renderiza o estilo do pandas.Styler nas colunas
     desabilitadas do data_editor; nas colunas editáveis (Status, Exam. M/T,
@@ -3231,7 +3147,7 @@ def _estilizar_grade_calendario(df: pd.DataFrame, horario_minimo_min: int | None
         return df
 
     def _aplicar(linha: pd.Series) -> list[str]:
-        estilo = _cor_linha_calendario(linha, horario_minimo_min)
+        estilo = _cor_linha_calendario(linha)
         return [estilo if col in _COLUNAS_DESTACAVEIS_EDITOR else "" for col in df.columns]
 
     return df.style.apply(_aplicar, axis=1)
@@ -3598,43 +3514,7 @@ def aba_calendario() -> None:
     else:
         df_exibicao = df_completo.copy()
 
-    # Ajuste 3 — alerta de deslocamento: linhas com vagas lançadas antes do
-    # horário em que a banca estimadamente chega ao município.
-    minutos_desloc = tempo_deslocamento_efetivo(banca, local)
-    horario_minimo_min = None
-    linhas_em_alerta = pd.DataFrame()
-    if minutos_desloc > 0:
-        chegada_estimada = horario_chegada_estimado(minutos_desloc)
-        horario_minimo_min = chegada_estimada.hour * 60 + chegada_estimada.minute
-        minutos_das_linhas = df_exibicao["Horário"].apply(_hhmm_para_minutos)
-        linhas_em_alerta = df_exibicao[
-            (df_exibicao["Total"] > 0)
-            & (df_exibicao["Status"] == STATUS_DISPONIVEL)
-            & minutos_das_linhas.notna()
-            & (minutos_das_linhas < horario_minimo_min)
-        ]
-
-    if not linhas_em_alerta.empty:
-        chave_ignorar = f"ignorar_alerta_desloc_{chave}"
-        if not st.session_state.get(chave_ignorar):
-            datas_em_alerta = ", ".join(
-                sorted(set(linhas_em_alerta["Data"]), key=lambda d: para_data(d) or datetime.date.max)
-            )
-            st.warning(
-                f"⚠️ {len(linhas_em_alerta)} horário(s) com vagas lançadas antes"
-                f" da chegada estimada ({chegada_estimada:%H:%M}) considerando o"
-                f" deslocamento até {local}: {datas_em_alerta}. As linhas ficam"
-                " destacadas em vermelho na grade abaixo — não é um bloqueio,"
-                " apenas um alerta."
-            )
-            if st.checkbox(
-                "Já verifiquei e quero manter estes horários assim mesmo",
-                key=f"chk_{chave_ignorar}",
-            ):
-                st.session_state[chave_ignorar] = True
-                st.rerun()
-
-    df_exibicao_estilizada = _estilizar_grade_calendario(df_exibicao, horario_minimo_min)
+    df_exibicao_estilizada = _estilizar_grade_calendario(df_exibicao)
 
     configuracao = {
         "Data": st.column_config.TextColumn("Data", disabled=True),
@@ -3674,9 +3554,8 @@ def aba_calendario() -> None:
         key=chave_editor,
     )
     st.caption(
-        "🟩 Linha já lançada (com vagas) · 🟥 Lançada antes do horário sugerido"
-        " pelo deslocamento · ⬜ Bloqueada (feriado/indisponível) · sem cor ="
-        " ainda vazia."
+        "🟩 Linha já lançada (com vagas) · ⬜ Bloqueada (feriado/indisponível) ·"
+        " sem cor = ainda vazia."
     )
 
     # ``update`` ignora NaN: sem o fillna, apagar uma célula descartava a edição.
@@ -3703,7 +3582,7 @@ def aba_calendario() -> None:
     bloqueadas = df_completo["Status"].isin(STATUS_BLOQUEADOS)
     df_completo.loc[bloqueadas, ["Exam. M", "Exam. T"]] = 0
 
-    st.session_state["historico_localidades"][chave] = df_completo
+    _mesclar_no_estado_em_memoria(chave, df_completo)
     salvar_historico(chave, df_completo)
 
     _monitor_efetivo(banca, mes_nome, ano, datas_do_mes, int(efetivo_maximo))
@@ -3839,156 +3718,6 @@ def _alertas_de_feriado(
     datas = datas_de_feriado_do_texto(texto, inicio.year)
     datas |= datas_de_feriado_do_texto(texto, fim.year)
     return sorted(d for d in datas if inicio <= d <= fim)
-
-
-def tempo_deslocamento_efetivo(banca: str, local: str) -> int:
-    """Minutos de deslocamento a usar: ajuste do usuário, senão a estimativa padrão."""
-    chave = chave_local(banca, local)
-    valor = st.session_state.get("tempo_deslocamento_dict", {}).get(chave)
-    return int(valor) if valor is not None else tempo_deslocamento_padrao(banca, local)
-
-
-def _painel_sugestao_deslocamento(
-    banca: str,
-    destino: str,
-    horarios_ativos: list[str],
-    trechos_da_equipe: list[Viagem],
-    data_inicio: datetime.date,
-    data_fim: datetime.date,
-    turno: str,
-) -> None:
-    """Mostra o horário sugerido de início considerando o deslocamento.
-
-    Cobre os dois cenários do Ajuste 3: (1) uma cidade só, deslocamento a
-    partir da sede da banca; (2) segunda cidade da mesma viagem no mesmo dia,
-    descontando 1h de almoço mais o deslocamento entre as duas cidades. Em
-    ambos os casos é só uma SUGESTÃO — nada aqui bloqueia o cadastro.
-    """
-    minutos_base = tempo_deslocamento_efetivo(banca, destino)
-    chave_desloc = chave_local(banca, destino)
-
-    if minutos_base <= 0:
-        st.caption(
-            f"📍 {destino}: sem deslocamento cadastrado (sede/região"
-            " metropolitana, ou sem estimativa — informe abaixo se precisar)."
-        )
-
-    with st.expander(f"🕒 Deslocamento até {destino}", expanded=minutos_base > 0):
-        novo_minutos = st.number_input(
-            "Minutos de deslocamento a partir da sede da banca (ajustável):",
-            min_value=0,
-            max_value=1440,
-            value=int(minutos_base),
-            step=5,
-            key=f"v_desloc_{chave_desloc}",
-            help=(
-                "Estimativa de referência — corrija aqui se souber o tempo real"
-                " de viagem; a correção fica salva para a próxima vez."
-            ),
-        )
-        if novo_minutos != minutos_base:
-            st.session_state.setdefault("tempo_deslocamento_dict", {})[
-                chave_desloc
-            ] = int(novo_minutos)
-            salvar_tempo_deslocamento(st.session_state["tempo_deslocamento_dict"])
-
-        if novo_minutos > 0:
-            chegada = horario_chegada_estimado(novo_minutos)
-            sugestao = sugerir_horario_inicio(horarios_ativos, chegada)
-            horas, minutos_resto = divmod(int(novo_minutos), 60)
-            duracao_txt = (
-                f"{horas}h{minutos_resto:02d}" if horas else f"{minutos_resto}min"
-            )
-            if sugestao:
-                st.info(
-                    f"Saindo às {HORA_PARTIDA_PADRAO:%H:%M} da sede, deslocamento de"
-                    f" ~{duracao_txt}, chegada estimada às {chegada:%H:%M}."
-                    f" **Sugestão: iniciar a primeira turma às {sugestao}.**"
-                )
-            else:
-                st.warning(
-                    f"Chegada estimada às {chegada:%H:%M} — depois do último"
-                    " horário cadastrado na grade. Considere iniciar o"
-                    " atendimento apenas no dia seguinte."
-                )
-
-    # Segunda cidade da mesma viagem, no mesmo dia — o caso de Pinheiro pela
-    # manhã e São Bento à tarde.
-    if data_fim < data_inicio:
-        return
-    dias_novos = set(dias_do_intervalo(data_inicio, data_fim))
-    for trecho in trechos_da_equipe:
-        if trecho.get("Destino") == destino:
-            continue
-        inicio_existente = para_data(trecho.get("Data Inicio"))
-        fim_existente = para_data(trecho.get("Data Fim"))
-        if not inicio_existente or not fim_existente:
-            continue
-        dias_comuns = sorted(
-            dias_novos & set(dias_do_intervalo(inicio_existente, fim_existente))
-        )
-        if not dias_comuns:
-            continue
-
-        dia_referencia = dias_comuns[0]
-        turno_existente = turno_da_viagem_no_dia(trecho, dia_referencia)
-        periodo_cidade1 = (
-            turno_existente if turno_existente in (TURNO_MANHA, TURNO_TARDE) else TURNO_MANHA
-        )
-        fim_turno1 = horario_fim_turno(horarios_ativos, periodo_cidade1)
-        if not fim_turno1:
-            continue
-
-        minutos_destino_existente = tempo_deslocamento_efetivo(
-            banca, trecho["Destino"]
-        )
-        chave_entre = f"v_desloc_entre_{chave_local(banca, destino)}_{chave_local(banca, trecho['Destino'])}"
-        deslocamento_padrao_entre = abs(minutos_base - minutos_destino_existente)
-
-        with st.expander(
-            f"🕒 Sequência no mesmo dia: {trecho['Destino']} → {destino}",
-            expanded=True,
-        ):
-            if turno_existente == TURNO_INTEGRAL:
-                st.caption(
-                    f"⚠️ {trecho['Destino']} ainda está marcado como"
-                    f" '{TURNO_INTEGRAL}' em {formatar_curto(dia_referencia)}."
-                    f" Para atender as duas cidades no mesmo dia, ajuste"
-                    f" {trecho['Destino']} para '{TURNO_MANHA}' no ajuste de"
-                    " turno por dia (assumindo manhã aqui para calcular)."
-                )
-            minutos_entre = st.number_input(
-                f"Deslocamento estimado entre {trecho['Destino']} e {destino}"
-                " (minutos):",
-                min_value=0,
-                max_value=600,
-                value=int(deslocamento_padrao_entre),
-                step=5,
-                key=chave_entre,
-                help=(
-                    "Sem uma rota exata entre as duas cidades, o padrão é a"
-                    " diferença entre os tempos de cada uma até a sede — ajuste"
-                    " se souber a distância real entre elas."
-                ),
-            )
-            sugestao2, chegada2 = sugerir_horario_segunda_cidade(
-                horarios_ativos, fim_turno1, minutos_entre
-            )
-            if sugestao2:
-                st.info(
-                    f"{trecho['Destino']} termina ~{fim_turno1:%H:%M} · +1h de"
-                    f" almoço · +{minutos_entre}min até {destino} → chegada"
-                    f" estimada às {chegada2:%H:%M}. **Sugestão: iniciar"
-                    f" {destino} às {sugestao2}"
-                    f" ({TURNO_TARDE if periodo_cidade1 == TURNO_MANHA else TURNO_MANHA}).**"
-                )
-            else:
-                st.warning(
-                    f"Chegada estimada às {chegada2:%H:%M} — depois do último"
-                    f" horário e do limite de {LIMITE_FIM_EXPEDIENTE:%H:%M}. Talvez"
-                    " não dê para atender as duas cidades no mesmo dia."
-                )
-        break  # um só bloco de sugestão, com o primeiro trecho que colide
 
 
 def _editor_turnos_por_dia(
@@ -4154,22 +3883,6 @@ def _formulario_cadastro_viagem() -> None:
                     for iso, valor in sorted(turnos_por_data.items())
                 )
             )
-
-    horarios_ativos = [
-        h
-        for h in st.session_state["lista_horarios"]
-        if h not in st.session_state["horarios_inativos"]
-    ]
-    trechos_da_equipe = [
-        v
-        for v in viagens
-        if v.get("Banca") == banca
-        and int(v.get("Numero Banca Itinerante", 0) or 0) == numero_equipe
-    ]
-    if horarios_ativos and data_fim >= data_inicio:
-        _painel_sugestao_deslocamento(
-            banca, destino, horarios_ativos, trechos_da_equipe, data_inicio, data_fim, turno
-        )
 
     examinadores_por_banca: dict[str, int] = {}
     participantes = bancas_para_validar(banca, bancas_apoio)
@@ -5085,7 +4798,19 @@ def main() -> None:
     st.markdown('<meta name="google" content="notranslate">', unsafe_allow_html=True)
     st.markdown(CSS_CUSTOMIZADO, unsafe_allow_html=True)
 
-    carregar_estado()
+    try:
+        carregar_estado()
+    except Exception as erro:
+        LOG.exception("Falha ao carregar o estado inicial do banco de dados")
+        st.error(
+            "🚨 Não foi possível abrir o banco de dados do sistema. Nenhum dado"
+            f" foi lido ou alterado. Detalhe técnico: {erro}"
+        )
+        st.info(
+            "Verifique se o arquivo do banco (variável `DETRAN_DB`) existe e"
+            " tem permissão de leitura/escrita, e tente recarregar a página."
+        )
+        st.stop()
 
     st.markdown(CABECALHO_HTML, unsafe_allow_html=True)
     painel_backup()
