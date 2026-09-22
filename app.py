@@ -3357,6 +3357,41 @@ def _pico_do_mes(banca: str, mes_nome: str, ano: int, mes_numero: int) -> int:
     return max(pico_diario(v["M"], v["T"]) for v in totais.values())
 
 
+def _renderizar_modo_foco_calendario() -> None:
+    """Tela dedicada para montar o calendário de uma banca, sem as outras
+    cinco abas por perto — só entra em cena quando o usuário pede, pelo
+    botão dentro da própria aba de calendário, e nunca muda o que já foi
+    lançado: é a mesma função `aba_calendario`, só que sozinha na tela.
+    """
+    col_titulo, col_sair = st.columns([5, 1.4])
+    with col_titulo:
+        st.markdown("## 🖊️ Modo de Montagem do Calendário")
+        st.caption(
+            "As outras abas ficam escondidas enquanto você trabalha aqui. Os"
+            " lançamentos são salvos normalmente a cada edição — pode entrar"
+            " e sair quando quiser, nada se perde."
+        )
+    with col_sair:
+        st.write("")
+        if st.button(
+            "✅ Concluir e voltar", key="btn_sair_modo_foco", **LARGURA_TOTAL
+        ):
+            st.session_state["modo_foco_calendario"] = False
+            st.rerun()
+
+    st.markdown("---")
+    aba_calendario()
+    st.markdown("---")
+
+    if st.button(
+        "✅ Concluir e voltar ao painel geral",
+        key="btn_sair_modo_foco_rodape",
+        **LARGURA_TOTAL,
+    ):
+        st.session_state["modo_foco_calendario"] = False
+        st.rerun()
+
+
 def aba_calendario() -> None:
     bancas_config = st.session_state["bancas_config"]
     if not bancas_config:
@@ -3378,6 +3413,30 @@ def aba_calendario() -> None:
         "Mês:", MESES_LISTA, index=indice_mes_atual(), key="cal_mes"
     )
     mes_numero = numero_do_mes(mes_nome)
+
+    # Atalho para o modo de tela cheia: só aparece quando ainda não estamos
+    # nele (evita o botão duplicado, já que esta mesma função é reaproveitada
+    # dentro do modo de foco).
+    if not st.session_state.get("modo_foco_calendario"):
+        col_aviso, col_botao = st.columns([4, 1.4])
+        with col_aviso:
+            st.caption(
+                "💡 Prefere montar o calendário sem as outras abas por perto?"
+            )
+        with col_botao:
+            if st.button(
+                f"🖊️ Tela cheia — {banca}",
+                key="btn_entrar_modo_foco",
+                **LARGURA_TOTAL,
+                help=(
+                    "Abre uma tela dedicada só para este calendário, com as"
+                    " outras abas escondidas. Nada do que você já editou se"
+                    " perde ao entrar ou sair."
+                ),
+            ):
+                st.session_state["modo_foco_calendario"] = True
+                st.rerun()
+        st.markdown("---")
 
     st.sidebar.markdown("---")
     st.sidebar.subheader("🛡️ Efetivo Diário da Banca")
@@ -4815,6 +4874,13 @@ def main() -> None:
     st.markdown(CABECALHO_HTML, unsafe_allow_html=True)
     painel_backup()
     barra_de_status()
+
+    if st.session_state.get("modo_foco_calendario"):
+        # Sozinho na tela: as outras cinco abas nem chegam a ser montadas
+        # neste rerun, o que também deixa a edição mais rápida enquanto o
+        # modo de foco estiver ativo.
+        _renderizar_modo_foco_calendario()
+        return
 
     guia_quadro, guia_calendario, guia_viagens, guia_horarios, guia_relatorio, guia_gestao = st.tabs(
         [
