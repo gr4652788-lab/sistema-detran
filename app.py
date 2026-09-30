@@ -3315,16 +3315,26 @@ def gerar_sugestao_automatica(
         return int(trabalho.index[-1])
 
     def capacidade_restante(grupo: dict, categoria: str) -> int:
+        """Vagas que ainda cabem no grupo, respeitando o efetivo restante.
+
+        IMPORTANTE: ``usados`` é quantidade de EXAMINADORES, enquanto o
+        retorno desta função é quantidade de VAGAS. A versão anterior
+        misturava essas duas unidades e, por exemplo, com 7 examinadores e
+        1 ocupado por D devolvia 6 vagas para B, quando o correto é:
+        6 examinadores restantes × 2 = 12 vagas de B.
+        """
         usados = usados_grupo(grupo)
-        if usados >= capacidade_total:
+        restantes_examinadores = max(0, capacidade_total - usados)
+        if restantes_examinadores <= 0:
             return 0
+
         capacidade = capacidade_categoria(
-            categoria, capacidade_total, pistas_a
+            categoria, restantes_examinadores, pistas_a
         )
         capacidade = capacidade_meio_turno(
             categoria, capacidade, grupo["base"]
         )
-        return max(0, min(capacidade, capacidade_total - usados))
+        return max(0, int(capacidade))
 
     # 1) Primeiro distribui A/C/D/E. A escolha do próximo horário considera
     # quantas vagas daquela categoria já existem nele, para espalhar a meta.
