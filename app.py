@@ -3157,19 +3157,27 @@ def gerar_sugestao_automatica(
     pistas_a: int,
     inicio: datetime.time,
     fim: datetime.time,
+    dias_por_categoria: dict[str, list[str]] | None = None,
     modo: str = "vazios",
 ) -> tuple[pd.DataFrame, dict[str, int], list[str]]:
-    """Distribui as metas mensais pelos dias/horários disponíveis.
+    """Gera uma sugestão equilibrada, respeitando efetivo, pistas e dias por categoria.
 
-    A, C, D e E ficam somente pela manhã. B pode ocupar manhã/tarde. Quando B
-    divide o horário-base com C/D/E, estas recebem 08:31/08:32/08:40 (e os
-    mesmos deslocamentos nos demais horários).
+    A/C/D/E são distribuídas primeiro e somente pela manhã. A distribuição
+    usa os horários elegíveis com menor carga da própria categoria, evitando
+    concentrar todas as vagas profissionais em um único horário. B é
+    preenchida depois, usando apenas a capacidade que restou em cada horário.
+
+    Quando B divide o horário-base com C/D/E, as categorias profissionais usam
+    os horários quebrados definidos em DESLOCAMENTOS_CATEGORIA.
     """
     trabalho = df.copy()
+
     for coluna in CATEGORIAS_AUTO:
         if coluna not in trabalho:
             trabalho[coluna] = 0
-        trabalho[coluna] = pd.to_numeric(trabalho[coluna], errors="coerce").fillna(0).astype(int)
+        trabalho[coluna] = (
+            pd.to_numeric(trabalho[coluna], errors="coerce").fillna(0).astype(int)
+        )
 
     if modo == "recalcular":
         trabalho.loc[:, CATEGORIAS_AUTO] = 0
@@ -3179,147 +3187,350 @@ def gerar_sugestao_automatica(
         for c in CATEGORIAS_AUTO
     }
     restantes = {
-        c: max(0, int(metas.get(c, 0) or 0) - (totais_existentes[c] if modo == "vazios" else 0))
+        c: max(
+            0,
+            int(metas.get(c, 0) or 0)
+            - (totais_existentes[c] if modo == "vazios" else 0),
+        )
         for c in CATEGORIAS_AUTO
     }
-    extras = set()
+
+    extras: set[str] = set()
     capacidade_total = max(0, int(examinadores or 0))
     if capacidade_total <= 0:
         return trabalho, restantes, []
 
-    # Agrupa linhas por data e horário-base, mantendo a ordem da grade.
-    trabalho["__base"] = trabalho["Horário"].map(horario_base)
-    trabalho["__hora_num"] = pd.to_datetime(trabalho["Horário"], format="%H:%M", errors="coerce")
-    trabalho["__base_num"] = pd.to_datetime(trabalho["__base"], format="%H:%M", errors="coerce")
-    datas = []
-    for data_texto, grupo_data in trabalho.groupby("Data", sort=False):
-        data = para_data(data_texto)
-        if data:
-            datas.append((data, data_texto, grupo_data))
-    datas.sort(key=lambda x: x[0])
-
-    # Ordem: A primeiro, depois B e as demais. Isso garante que a categoria A
-    # não seja espremida por categorias de 2 exames/examinador.
-    ordem = ["Cat A", "Cat B", "Cat C", "Cat D", "Cat E"]
-    for data, data_texto, _ in datas:
-        if not any(restantes.values()):
-            break
-        if data.weekday() >= 7:
-            continue
-        indices_data = trabalho.index[trabalho["Data"] == data_texto]
-        if len(indices_data) == 0:
-            continue
-        bases = sorted(
-            set(trabalho.loc[indices_data, "__base"]),
-            key=lambda x: pd.to_datetime(x, format="%H:%M", errors="coerce"),
-        )
-        for base in bases:
-            if not any(restantes.values()):
-                break
-            try:
-                hora_base = datetime.datetime.strptime(base, "%H:%M").time()
-            except ValueError:
-                continue
-            if not (inicio <= hora_base <= fim):
-                continue
-            # Uma unidade de efetivo é compartilhada por todas as linhas do
-            # horário-base (inclusive os horários quebrados).
-            indices_grupo = trabalho.index[
-                (trabalho["Data"] == data_texto) & (trabalho["__base"] == base)
+    dias_por_categoria = dias_por_categoria or {
+        categoria: [] for categoria in CATEGORIAS_AUTO
+    }
+    # Segurança: nenhuma categoria pode receber dias que não sejam dias da
+    # grade da localidade.
+    dias_grade = set(
+        str(x) for x in st.session_state.get("_auto_dias_grade_atual", [])
+    )
+    for categoria in CATEGORIAS_AUTO:
+        selecionados = dias_por_categoria.get(categoria, [])
+        if dias_grade:
+            dias_por_categoria[categoria] = [
+                d for d in selecionados if d in dias_grade
             ]
-            if len(indices_grupo) == 0:
-                continue
-            if any(trabalho.loc[indices_grupo, "Status"].isin(STATUS_BLOQUEADOS)):
-                # Não agenda em grupo bloqueado.
-                continue
+        else:
+            dias_por_categoria[categoria] = list(selecionados)
 
-            # O que já estiver lançado manualmente no horário-base também
-            # consome efetivo e conta para a decisão de quebrar B/C/D/E.
-            usados = 0
-            alocados = {c: 0 for c in CATEGORIAS_AUTO}
-            for categoria_existente in CATEGORIAS_AUTO:
-                colunas_existentes = [categoria_existente]
-                pcd = categoria_existente.replace("Cat ", "PCD ")
-                if pcd in trabalho.columns:
-                    colunas_existentes.append(pcd)
-                vagas_existentes = sum(
-                    int(trabalho.loc[indices_grupo, c].fillna(0).sum())
-                    for c in colunas_existentes
+    trabalho["__base"] = trabalho["Horário"].map(horario_base)
+
+    # Constrói os grupos (data + horário-base) que compartilham o mesmo
+    # efetivo. Horários quebrados pertencem ao mesmo grupo do horário principal.
+    grupos = []
+    for (data_texto, base), grupo in trabalho.groupby(
+        ["Data", "__base"], sort=False
+    ):
+        data = para_data(data_texto)
+        if not data:
+            continue
+        try:
+            hora_base = datetime.datetime.strptime(str(base), "%H:%M").time()
+        except ValueError:
+            continue
+        if not (inicio <= hora_base <= fim):
+            continue
+
+        indices = grupo.index
+        bloqueado = any(
+            trabalho.loc[indices, "Status"].isin(STATUS_BLOQUEADOS)
+        )
+        dia_semana = DIAS_SEMANA_OPCOES[data.weekday()]
+        grupos.append(
+            {
+                "data": data,
+                "data_texto": data_texto,
+                "base": str(base),
+                "hora": hora_base,
+                "dia": dia_semana,
+                "indices": indices,
+                "bloqueado": bloqueado,
+            }
+        )
+
+    grupos.sort(key=lambda x: (x["data"], x["hora"]))
+
+    def vagas_grupo(grupo: dict, categoria: str) -> int:
+        colunas = [categoria]
+        pcd = categoria.replace("Cat ", "PCD ")
+        if pcd in trabalho.columns:
+            colunas.append(pcd)
+        return sum(
+            int(pd.to_numeric(trabalho.loc[grupo["indices"], c], errors="coerce").fillna(0).sum())
+            for c in colunas
+        )
+
+    def usados_grupo(grupo: dict) -> int:
+        usados = 0
+        for categoria in CATEGORIAS_AUTO:
+            vagas = vagas_grupo(grupo, categoria)
+            if vagas:
+                req = examinadores_necessarios_categoria(
+                    categoria, vagas, pistas_a
                 )
-                if vagas_existentes:
-                    usados += examinadores_necessarios_categoria(
-                        categoria_existente, vagas_existentes, pistas_a
-                    )
-                    alocados[categoria_existente] = vagas_existentes
-
-            for categoria in ordem:
-                if restantes[categoria] <= 0:
-                    continue
-                if categoria in CATEGORIAS_MANHA_AUTO and hora_base >= datetime.time(12, 0):
-                    continue
-                capacidade = capacidade_categoria(categoria, capacidade_total, pistas_a)
-                capacidade = capacidade_meio_turno(categoria, capacidade, base)
-                if capacidade <= 0:
-                    continue
-                # Não ultrapassa a meta nem a capacidade por categoria.
-                vagas = min(restantes[categoria], capacidade)
-                # Ajusta ao efetivo que ainda sobra no horário-base.
-                while vagas > 0:
-                    req = examinadores_necessarios_categoria(categoria, vagas, pistas_a)
-                    if usados + req <= capacidade_total:
-                        break
-                    vagas -= 1
-                if vagas <= 0:
-                    continue
-                req = examinadores_necessarios_categoria(categoria, vagas, pistas_a)
-                if req <= 0 or usados + req > capacidade_total:
-                    continue
-                # No modo "vazios", não substitui lançamento manual.
-                destino = base
-                if categoria in DESLOCAMENTOS_CATEGORIA and alocados.get("Cat B", 0) > 0:
-                    destino = horario_com_deslocamento(base, categoria)
-                    extras.add(destino)
-                candidatos = trabalho.index[
-                    (trabalho["Data"] == data_texto) & (trabalho["Horário"] == destino)
-                ]
-                if len(candidatos) == 0:
-                    # O horário quebrado será criado abaixo.
-                    nova = {
-                        "Data": data_texto,
-                        "Dia da Semana": DIAS_SEMANA_OPCOES[data.weekday()],
-                        "Status": STATUS_DISPONIVEL,
-                        "Exam. M": capacidade_total if hora_base < datetime.time(12, 0) else 0,
-                        "Exam. T": capacidade_total if hora_base >= datetime.time(12, 0) else 0,
-                        "Horário": destino,
-                    }
-                    nova.update({c: 0 for c in COLS_VAGAS})
-                    nova["Total"] = 0
-                    trabalho = pd.concat([trabalho, pd.DataFrame([nova])], ignore_index=True)
-                    trabalho["__base"] = trabalho["Horário"].map(horario_base)
-                    candidatos = trabalho.index[
-                        (trabalho["Data"] == data_texto) & (trabalho["Horário"] == destino)
-                    ]
-                idx = candidatos[-1]
-                if modo == "vazios" and any(int(trabalho.loc[idx, c]) > 0 for c in CATEGORIAS_AUTO):
-                    continue
-                trabalho.loc[idx, categoria] = int(vagas)
-                if hora_base < datetime.time(12, 0):
-                    trabalho.loc[idx, "Exam. M"] = capacidade_total
-                else:
-                    trabalho.loc[idx, "Exam. T"] = capacidade_total
-                restantes[categoria] -= int(vagas)
-                alocados[categoria] = int(vagas)
+                if (
+                    categoria in CATEGORIAS_MANHA_AUTO
+                    and grupo["hora"] >= datetime.time(12, 0)
+                ):
+                    return capacidade_total + 1
                 usados += req
+        return usados
 
-    trabalho.drop(columns=["__base", "__hora_num", "__base_num"], errors="ignore", inplace=True)
+    def destino_para_categoria(grupo: dict, categoria: str) -> str:
+        # Só cria horário quebrado quando B já está no mesmo horário-base.
+        if (
+            categoria in DESLOCAMENTOS_CATEGORIA
+            and vagas_grupo(grupo, "Cat B") > 0
+        ):
+            return horario_com_deslocamento(grupo["base"], categoria)
+        return grupo["base"]
+
+    def garantir_linha_destino(grupo: dict, categoria: str) -> int | None:
+        destino = destino_para_categoria(grupo, categoria)
+        candidatos = trabalho.index[
+            (trabalho["Data"] == grupo["data_texto"])
+            & (trabalho["Horário"] == destino)
+        ]
+        if len(candidatos):
+            return int(candidatos[-1])
+
+        # Cria a linha quebrada somente quando realmente necessária.
+        nova = {
+            "Data": grupo["data_texto"],
+            "Dia da Semana": grupo["dia"],
+            "Status": STATUS_DISPONIVEL,
+            "Exam. M": capacidade_total if grupo["hora"] < datetime.time(12, 0) else 0,
+            "Exam. T": capacidade_total if grupo["hora"] >= datetime.time(12, 0) else 0,
+            "Horário": destino,
+        }
+        nova.update({c: 0 for c in COLS_VAGAS})
+        nova["Total"] = 0
+        trabalho.loc[len(trabalho)] = nova
+        trabalho["__base"] = trabalho["Horário"].map(horario_base)
+        extras.add(destino)
+        return int(trabalho.index[-1])
+
+    def capacidade_restante(grupo: dict, categoria: str) -> int:
+        usados = usados_grupo(grupo)
+        if usados >= capacidade_total:
+            return 0
+        capacidade = capacidade_categoria(
+            categoria, capacidade_total, pistas_a
+        )
+        capacidade = capacidade_meio_turno(
+            categoria, capacidade, grupo["base"]
+        )
+        return max(0, min(capacidade, capacidade_total - usados))
+
+    # 1) Primeiro distribui A/C/D/E. A escolha do próximo horário considera
+    # quantas vagas daquela categoria já existem nele, para espalhar a meta.
+    profissionais = ["Cat A", "Cat C", "Cat D", "Cat E"]
+
+    for categoria in profissionais:
+        bloqueados_categoria = set()
+        while restantes[categoria] > 0:
+            dia_opcoes = set(dias_por_categoria.get(categoria, []))
+            candidatos = [
+                g for g in grupos
+                if (
+                    not g["bloqueado"]
+                    and g["dia"] in dia_opcoes
+                    and g["hora"] < datetime.time(12, 0)
+                    and id(g) not in bloqueados_categoria
+                    and capacidade_restante(g, categoria) > 0
+                )
+            ]
+            if not candidatos:
+                break
+
+            # Ordenação por carga da categoria, depois por carga total e data.
+            # Isso força a distribuição pelos vários horários antes de voltar
+            # a reutilizar um horário que já recebeu a categoria.
+            candidatos.sort(
+                key=lambda g: (
+                    vagas_grupo(g, categoria),
+                    usados_grupo(g),
+                    g["data"],
+                    g["hora"],
+                )
+            )
+
+            grupo = candidatos[0]
+            cap = capacidade_restante(grupo, categoria)
+            if cap <= 0:
+                break
+
+            # Distribui a meta de forma equilibrada: o próximo lançamento não
+            # recebe mais que o necessário para manter os candidatos próximos.
+            quantidade_slots = max(1, len(candidatos))
+            alvo = (restantes[categoria] + quantidade_slots - 1) // quantidade_slots
+            vagas = min(restantes[categoria], cap, max(1, alvo))
+
+            # Para A, uma dupla trabalha em blocos de até 12. Não deixamos
+            # quantidade impossível de acomodar pelo número de examinadores.
+            if categoria == "Cat A" and vagas > 12:
+                vagas = 12
+
+            while vagas > 0:
+                req = examinadores_necessarios_categoria(
+                    categoria, vagas, pistas_a
+                )
+                if req > 0 and usados_grupo(grupo) + req <= capacidade_total:
+                    break
+                vagas -= 1
+
+            if vagas <= 0:
+                # Este horário não comporta a próxima parcela; tente outro.
+                bloqueados_categoria.add(id(grupo))
+                continue
+
+            idx = garantir_linha_destino(grupo, categoria)
+            if idx is None:
+                bloqueados_categoria.add(id(grupo))
+                continue
+
+            if modo == "vazios":
+                # Nunca substitui uma quantidade já lançada manualmente na
+                # linha de destino.
+                if int(trabalho.loc[idx, categoria] or 0) > 0:
+                    bloqueados_categoria.add(id(grupo))
+                    continue
+
+            trabalho.loc[idx, categoria] = int(vagas)
+            if grupo["hora"] < datetime.time(12, 0):
+                trabalho.loc[idx, "Exam. M"] = capacidade_total
+            else:
+                trabalho.loc[idx, "Exam. T"] = capacidade_total
+
+            restantes[categoria] -= int(vagas)
+
+    # 2) Só depois das profissionais, distribui B pela capacidade restante.
+    categoria = "Cat B"
+    bloqueados_b = set()
+    while restantes[categoria] > 0:
+        dia_opcoes = set(dias_por_categoria.get(categoria, []))
+        candidatos = [
+            g for g in grupos
+            if (
+                not g["bloqueado"]
+                and g["dia"] in dia_opcoes
+                and inicio <= g["hora"] <= fim
+                and id(g) not in bloqueados_b
+                and capacidade_restante(g, categoria) > 0
+            )
+        ]
+        if not candidatos:
+            break
+
+        candidatos.sort(
+            key=lambda g: (
+                usados_grupo(g),
+                vagas_grupo(g, categoria),
+                g["data"],
+                g["hora"],
+            )
+        )
+        grupo = candidatos[0]
+        cap = capacidade_restante(grupo, categoria)
+        vagas = min(restantes[categoria], cap)
+        while vagas > 0:
+            req = examinadores_necessarios_categoria(
+                categoria, vagas, pistas_a
+            )
+            if req > 0 and usados_grupo(grupo) + req <= capacidade_total:
+                break
+            vagas -= 1
+        if vagas <= 0:
+            bloqueados_b.add(id(grupo))
+            continue
+
+        idx = garantir_linha_destino(grupo, categoria)
+        if idx is None:
+            bloqueados_b.add(id(grupo))
+            continue
+        if modo == "vazios" and int(trabalho.loc[idx, categoria] or 0) > 0:
+            bloqueados_b.add(id(grupo))
+            continue
+
+        trabalho.loc[idx, categoria] = int(vagas)
+        if grupo["hora"] < datetime.time(12, 0):
+            trabalho.loc[idx, "Exam. M"] = capacidade_total
+        else:
+            trabalho.loc[idx, "Exam. T"] = capacidade_total
+        restantes[categoria] -= int(vagas)
+
+    # 3) Se B acabou sendo colocado depois das profissionais, reposiciona
+    # C/D/E para os horários quebrados correspondentes. Isso garante que a
+    # regra de 08:30 -> 08:31/08:32/08:40 também funcione quando a distribuição
+    # das categorias profissionais ocorreu antes da distribuição de B.
+    for grupo in grupos:
+        if grupo["bloqueado"] or vagas_grupo(grupo, "Cat B") <= 0:
+            continue
+        for categoria in ["Cat C", "Cat D", "Cat E"]:
+            candidatos_base = trabalho.index[
+                (trabalho["Data"] == grupo["data_texto"])
+                & (trabalho["Horário"] == grupo["base"])
+            ]
+            if len(candidatos_base) == 0:
+                continue
+            idx_base = int(candidatos_base[-1])
+            valor_cat = int(pd.to_numeric(
+                trabalho.loc[idx_base, categoria], errors="coerce"
+            ) or 0)
+            pcd = categoria.replace("Cat ", "PCD ")
+            valor_pcd = 0
+            if pcd in trabalho.columns:
+                valor_pcd = int(pd.to_numeric(
+                    trabalho.loc[idx_base, pcd], errors="coerce"
+                ) or 0)
+            if valor_cat <= 0 and valor_pcd <= 0:
+                continue
+
+            destino = horario_com_deslocamento(grupo["base"], categoria)
+            candidatos_destino = trabalho.index[
+                (trabalho["Data"] == grupo["data_texto"])
+                & (trabalho["Horário"] == destino)
+            ]
+            if len(candidatos_destino):
+                idx_destino = int(candidatos_destino[-1])
+            else:
+                nova = {
+                    "Data": grupo["data_texto"],
+                    "Dia da Semana": grupo["dia"],
+                    "Status": STATUS_DISPONIVEL,
+                    "Exam. M": capacidade_total,
+                    "Exam. T": 0,
+                    "Horário": destino,
+                }
+                nova.update({c: 0 for c in COLS_VAGAS})
+                nova["Total"] = 0
+                trabalho.loc[len(trabalho)] = nova
+                idx_destino = int(trabalho.index[-1])
+                extras.add(destino)
+
+            trabalho.loc[idx_destino, categoria] = valor_cat
+            if pcd in trabalho.columns:
+                trabalho.loc[idx_destino, pcd] = valor_pcd
+            trabalho.loc[idx_base, categoria] = 0
+            if pcd in trabalho.columns:
+                trabalho.loc[idx_base, pcd] = 0
+
+    trabalho.drop(columns=["__base"], errors="ignore", inplace=True)
     for coluna in CATEGORIAS_AUTO:
-        trabalho[coluna] = pd.to_numeric(trabalho[coluna], errors="coerce").fillna(0).astype(int)
+        trabalho[coluna] = (
+            pd.to_numeric(trabalho[coluna], errors="coerce").fillna(0).astype(int)
+        )
     trabalho["Total"] = trabalho.apply(
-        lambda linha: 0 if linha["Status"] in STATUS_BLOQUEADOS else int(sum(int(linha[c]) for c in COLS_VAGAS)),
+        lambda linha: 0
+        if linha["Status"] in STATUS_BLOQUEADOS
+        else int(sum(int(linha[c]) for c in COLS_VAGAS)),
         axis=1,
     )
     return trabalho, restantes, sorted(extras)
-
 
 def _montar_grade_base(
     *,
@@ -3904,6 +4115,20 @@ def aba_calendario() -> None:
                 value=int(regra_auto.get("metas", {}).get(categoria, 0) or 0),
                 step=1, key=chave_meta,
             )
+        st.markdown("**Dias da semana de oferta por categoria**")
+        dias_auto = {}
+        dias_grade = list(dias_permitidos)
+        for categoria in CATEGORIAS_AUTO:
+            chave_dias = f"dias_{categoria.replace(' ', '_').lower()}_{chave_loc}"
+            salvos = regra_auto.get("dias_por_categoria", {}).get(categoria, dias_grade)
+            salvos = [d for d in salvos if d in dias_grade]
+            dias_auto[categoria] = st.multiselect(
+                f"Categoria {categoria.replace('Cat ', '')}:",
+                options=dias_grade,
+                default=salvos,
+                key=chave_dias,
+            )
+
         modo_auto = st.radio(
             "Se já houver lançamento manual:",
             ["Preencher somente vazios", "Recalcular toda a sugestão"],
@@ -3929,6 +4154,7 @@ def aba_calendario() -> None:
                         "inicio": inicio_auto.strftime("%H:%M"),
                         "fim": fim_auto.strftime("%H:%M"),
                         "metas": {k: int(v) for k, v in metas_auto.items()},
+                        "dias_por_categoria": {k: list(v) for k, v in dias_auto.items()},
                     }
                 )
                 salvar_config("regras_automaticas_calendario", st.session_state["regras_automaticas_calendario"], forcar=True)
@@ -3939,6 +4165,7 @@ def aba_calendario() -> None:
                     "inicio": inicio_auto.strftime("%H:%M"),
                     "fim": fim_auto.strftime("%H:%M"),
                     "metas": {k: int(v) for k, v in metas_auto.items()},
+                    "dias_por_categoria": {k: list(v) for k, v in dias_auto.items()},
                     "modo": "recalcular" if modo_auto.startswith("Recalcular") else "vazios",
                 }
                 st.rerun()
@@ -4002,6 +4229,7 @@ def aba_calendario() -> None:
     if isinstance(pendente, dict) and pendente.get("chave") == chave_loc:
         inicio_p = _hora_objeto(pendente.get("inicio", "08:30"), datetime.time(8, 30))
         fim_p = _hora_objeto(pendente.get("fim", "16:30"), datetime.time(16, 30))
+        st.session_state["_auto_dias_grade_atual"] = list(dias_permitidos)
         df_completo, restantes, novos_extras = gerar_sugestao_automatica(
             df_completo,
             metas=pendente.get("metas", {}),
@@ -4009,8 +4237,10 @@ def aba_calendario() -> None:
             pistas_a=int(pendente.get("pistas_a", 0) or 0),
             inicio=inicio_p,
             fim=fim_p,
+            dias_por_categoria=pendente.get("dias_por_categoria", {}),
             modo=pendente.get("modo", "vazios"),
         )
+        st.session_state.pop("_auto_dias_grade_atual", None)
         todos_extras = sorted(set(extras_salvos) | set(novos_extras))
         st.session_state["horarios_extras_calendario"][chave_loc] = todos_extras
         salvar_config("horarios_extras_calendario", st.session_state["horarios_extras_calendario"], forcar=True)
