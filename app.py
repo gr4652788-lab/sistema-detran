@@ -2014,9 +2014,33 @@ def gerar_pdf_localidade(
 
     pcd_usadas = _colunas_com_valor(df_filtrado, COLS_PCD)
     colunas, linhas, destaques = _linhas_grade_detalhada(df_filtrado, pcd_usadas)
-
-    tabela = Table([colunas] + linhas, repeatRows=1)
-    tabela.setStyle(_estilo_tabela_padrao(destaques))
+    total_local = int(df_filtrado["Total"].fillna(0).sum())
+    dias_unicos = sorted(
+        {d.day for d in (para_data(x) for x in df_filtrado["Data"].unique()) if d}
+    )
+    legenda = (
+        f"<b>{html.escape(local)}</b> — {len(dias_unicos)} dia(s) de exame:"
+        f" {formatar_datas_exames(dias_unicos)} — {total_local} vagas"
+    )
+    largura_tabela = _larguras_proporcionais(len(colunas))
+    linha_legenda = [Paragraph(legenda, estilos["local"])] + [""] * (len(colunas) - 1)
+    tabela = Table(
+        [linha_legenda, colunas] + linhas,
+        repeatRows=2,
+        colWidths=largura_tabela,
+    )
+    estilo = _estilo_tabela_padrao([i + 1 for i in destaques])
+    estilo.add("BACKGROUND", (0, 1), (-1, 1), colors.HexColor(COR_PRIMARIA))
+    estilo.add("TEXTCOLOR", (0, 1), (-1, 1), colors.whitesmoke)
+    estilo.add("FONTNAME", (0, 1), (-1, 1), "Helvetica-Bold")
+    estilo.add("ALIGN", (0, 1), (-1, 1), "CENTER")
+    estilo.add("SPAN", (0, 0), (-1, 0))
+    estilo.add("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#EDF2F7"))
+    estilo.add("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor(COR_SECUNDARIA))
+    estilo.add("ALIGN", (0, 0), (-1, 0), "LEFT")
+    estilo.add("TOPPADDING", (0, 0), (-1, 0), 4)
+    estilo.add("BOTTOMPADDING", (0, 0), (-1, 0), 4)
+    tabela.setStyle(estilo)
     elementos.append(tabela)
     documento.build(elementos)
     return buffer.getvalue()
@@ -2107,24 +2131,38 @@ def gerar_pdf_banca(
             f" {formatar_datas_exames(dias_unicos)} — {total_local} vagas"
         )
 
+        linha_legenda = [Paragraph(legenda, estilos["local"])] + [""] * (len(cabecalho) - 1)
         tabela = Table(
-            [cabecalho] + linhas,
-            repeatRows=1,
+            [linha_legenda, cabecalho] + linhas,
+            repeatRows=2,
             colWidths=_larguras_proporcionais(len(cabecalho)),
         )
-        estilo_tabela = _estilo_tabela_padrao(destaques_relativos)
+        # O índice das linhas de destaque sobe uma posição porque a legenda
+        # agora faz parte da própria tabela.
+        destaques_tabela = [i + 1 for i in destaques_relativos]
+        estilo_tabela = _estilo_tabela_padrao(destaques_tabela)
+        estilo_tabela.add("BACKGROUND", (0, 1), (-1, 1), colors.HexColor(COR_PRIMARIA))
+        estilo_tabela.add("TEXTCOLOR", (0, 1), (-1, 1), colors.whitesmoke)
+        estilo_tabela.add("FONTNAME", (0, 1), (-1, 1), "Helvetica-Bold")
+        estilo_tabela.add("ALIGN", (0, 1), (-1, 1), "CENTER")
+        estilo_tabela.add("SPAN", (0, 0), (-1, 0))
+        estilo_tabela.add("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#EDF2F7"))
+        estilo_tabela.add("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor(COR_SECUNDARIA))
+        estilo_tabela.add("ALIGN", (0, 0), (-1, 0), "LEFT")
+        estilo_tabela.add("TOPPADDING", (0, 0), (-1, 0), 4)
+        estilo_tabela.add("BOTTOMPADDING", (0, 0), (-1, 0), 4)
         # A linha de total geral se destaca mais que os subtotais por data.
+        indice_total_tabela = indice_total_geral + 1
         estilo_tabela.add(
             "BACKGROUND",
-            (0, indice_total_geral),
-            (-1, indice_total_geral),
+            (0, indice_total_tabela),
+            (-1, indice_total_tabela),
             colors.HexColor(COR_SECUNDARIA),
         )
         estilo_tabela.add(
-            "TEXTCOLOR", (0, indice_total_geral), (-1, indice_total_geral), colors.white
+            "TEXTCOLOR", (0, indice_total_tabela), (-1, indice_total_tabela), colors.white
         )
         tabela.setStyle(estilo_tabela)
-        elementos.append(Paragraph(legenda, estilos["local"]))
         elementos.append(tabela)
 
     if not houve_conteudo:
@@ -2713,7 +2751,10 @@ def bloco_pdf(
     if st.button(rotulo_gerar, key=f"btn_gerar_{chave}", help=ajuda):
         try:
             st.session_state[chave_bytes] = gerador()
-            st.session_state[chave_previa] = True
+            # Não abre um iframe/PDF pesado automaticamente após cada geração.
+            # A prévia passa a ser opcional, reduzindo o efeito de tela branca
+            # durante os reruns do Streamlit e evitando renderização duplicada.
+            st.session_state[chave_previa] = False
         except Exception as erro:
             LOG.exception("Falha ao gerar o PDF %s", chave)
             st.error(f"Não foi possível gerar o PDF: {erro}")
@@ -2739,8 +2780,8 @@ def bloco_pdf(
         )
 
     if st.checkbox(
-        "👁️ Pré-visualizar aqui na página",
-        value=bool(st.session_state.get(chave_previa)),
+        "👁️ Pré-visualizar aqui na página (pode consumir mais memória)",
+        value=False,
         key=f"chk_previa_{chave}",
     ):
         _previa_pdf(pdf_bytes, chave, altura_previa)
@@ -3574,7 +3615,16 @@ def _montar_grade_base(
         data = datetime.date(ano, mes_numero, numero_dia)
         nome_dia = DIAS_SEMANA_OPCOES[data.weekday()]
         tem_viagem_no_dia = any(viagem_cobre_dia(v, data) for v in viagens_do_local)
-        if nome_dia not in dias_permitidos and not tem_viagem_no_dia:
+
+        # Localidades que possuem viagem itinerante cadastrada não podem
+        # ganhar automaticamente os demais dias do mês só porque o dia da
+        # semana está marcado na grade. A própria viagem é a fonte de
+        # verdade para o período de atendimento do município.
+        eh_itinerante = bool(viagens_do_local)
+        if eh_itinerante:
+            if not tem_viagem_no_dia:
+                continue
+        elif nome_dia not in dias_permitidos:
             continue
 
         data_texto = data.strftime("%d/%m/%Y")
@@ -4070,8 +4120,10 @@ def aba_calendario() -> None:
         ),
         key=f"cal_dias_{chave_loc}",
     )
-    st.session_state["dias_permitidos_dict"][chave_loc] = dias_permitidos
-    salvar_dias_permitidos(st.session_state["dias_permitidos_dict"])
+    dias_anteriores = list(st.session_state["dias_permitidos_dict"].get(chave_loc, []))
+    if dias_anteriores != list(dias_permitidos):
+        st.session_state["dias_permitidos_dict"][chave_loc] = list(dias_permitidos)
+        salvar_dias_permitidos(st.session_state["dias_permitidos_dict"])
 
     # ------------------------------------------------------------------
     # Gerador automático por capacidade
@@ -4195,8 +4247,10 @@ def aba_calendario() -> None:
         help="Formatos aceitos: DD/MM, DD/MM/AAAA ou AAAA-MM-DD",
         key=f"cal_feriados_{chave_loc}",
     )
-    st.session_state["feriados_locais_dict"][chave_loc] = texto_feriados
-    salvar_feriados_locais(st.session_state["feriados_locais_dict"])
+    feriados_anterior = st.session_state["feriados_locais_dict"].get(chave_loc, "")
+    if feriados_anterior != texto_feriados:
+        st.session_state["feriados_locais_dict"][chave_loc] = texto_feriados
+        salvar_feriados_locais(st.session_state["feriados_locais_dict"])
 
     feriados = set(feriados_estaduais(ano))
     feriados |= datas_de_feriado_do_texto(texto_feriados, ano)
@@ -4283,6 +4337,18 @@ def aba_calendario() -> None:
         if banca_vinculada(v, banca) and v.get("Destino") == local
     ]
     if viagens_do_local:
+        referencias_validas = [
+            v for v in viagens_do_local
+            if para_data(v.get("Data Inicio")) and para_data(v.get("Data Fim"))
+        ]
+        inicio_itinerante = min(para_data(v["Data Inicio"]) for v in referencias_validas) if referencias_validas else None
+        fim_itinerante = max(para_data(v["Data Fim"]) for v in referencias_validas) if referencias_validas else None
+        if inicio_itinerante and fim_itinerante:
+            st.info(
+                f"📍 **Localidade itinerante:** o calendário desta localidade fica limitado automaticamente "
+                f"ao(s) período(s) configurado(s) na Gestão de Viagens: "
+                f"**{formatar_br(inicio_itinerante)} a {formatar_br(fim_itinerante)}**."
+            )
         referencia = viagens_do_local[0]
         ajustes = descricao_turnos(referencia)
         st.success(
