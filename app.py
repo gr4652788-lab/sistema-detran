@@ -2059,222 +2059,189 @@ def gerar_pdf_banca(
     mes_numero: int,
     efetivo_maximo: int,
 ) -> bytes:
-    """Calendário completo da banca, para conferência antes da publicação.
+    """PDF completo da banca em formato-resumo para publicação.
 
-    As localidades saem na ordem pedida: unidades da sede, região
-    metropolitana e depois os demais municípios pela data do primeiro exame.
+    O layout segue o modelo de publicação mensal usado como referência:
+    uma tabela consolidada por banca, com uma linha por localidade, categorias
+    A-E e as datas de exame compactadas. O detalhamento horário continua
+    disponível no PDF individual da localidade.
     """
     buffer = io.BytesIO()
     documento = SimpleDocTemplate(
         buffer,
         pagesize=landscape(A4),
-        rightMargin=15,
-        leftMargin=15,
-        topMargin=15,
-        bottomMargin=15,
-        title=f"Calendário {banca} — {mes}/{ano}",
+        rightMargin=18,
+        leftMargin=18,
+        topMargin=18,
+        bottomMargin=18,
+        title=f"Quantidade de Exames Mensais de {banca} — {mes}/{ano}",
     )
     estilos = _estilos_pdf()
     elementos: list = []
-    _cabecalho_oficial(
-        elementos,
-        estilos,
-        "CALENDÁRIO CONSOLIDADO DE EXAMES PRÁTICOS — "
-        f"{html.escape(str(banca)).upper()} — {html.escape(str(mes)).upper()}/{ano}",
+
+    titulo = (
+        f"QUANTIDADE DE EXAMES MENSAIS DE {html.escape(str(banca)).upper()} "
+        f"E REGIÃO — {html.escape(str(mes)).upper()} DE {ano}"
     )
+    _cabecalho_oficial(elementos, estilos, titulo)
 
     ordenadas = ordenar_localidades_para_pdf(banca, bancas_config, dados_por_local)
-    grupo_atual = None
+    linhas_tabela: list[list[Any]] = []
+    grupos_vistos: set[str] = set()
+    total_banca = {c: 0 for c in COLS_CATEGORIA}
     total_geral = 0
-    houve_conteudo = False
-    primeira_localidade = True
+    houve = False
+    linhas_grupo: list[int] = []
 
     for grupo, local in ordenadas:
-        df_local_bruto = dados_por_local.get(local)
-        df_local = _ordenar_por_data(_apenas_disponiveis(df_local_bruto))
-        if df_local.empty:
+        df_local = dados_por_local.get(local)
+        df_local = _ordenar_por_data(_apenas_disponiveis(df_local))
+        if df_local is None or df_local.empty:
             continue
 
-        # Cada localidade começa em página nova: é o que permite entregar a
-        # grade de um município isoladamente para o colaborador responsável
-        # por lançar aquele calendário, sem recortar o PDF manualmente.
-        if not primeira_localidade:
-            elementos.append(PageBreak())
-        primeira_localidade = False
-        houve_conteudo = True
+        houve = True
 
-        if grupo != grupo_atual:
-            elementos.append(Paragraph(html.escape(grupo), estilos["grupo"]))
-            grupo_atual = grupo
-
-        pcd_usadas = _colunas_com_valor(df_local, COLS_PCD)
-        cabecalho, linhas, destaques = _linhas_grade_detalhada(df_local, pcd_usadas)
-
-        total_local = int(df_local["Total"].fillna(0).sum())
-        total_geral += total_local
-
-        # Uma linha de total geral da localidade, além dos subtotais por
-        # data: dá o resumo rápido sem perder o detalhe linha a linha.
-        rodape = [f"TOTAL GERAL — {local}".upper(), "", "", "-", "-", "-"]
-        for coluna in COLS_CATEGORIA + pcd_usadas:
-            rodape.append(_texto_ou_traco(int(df_local[coluna].fillna(0).sum())))
-        rodape.append(str(total_local))
-        linhas.append(rodape)
-        indice_total_geral = len(linhas)
-        destaques_relativos = destaques + [indice_total_geral]
+        # Separador visual de grupo, sem repetir a tabela inteira.
+        if grupo not in grupos_vistos:
+            grupos_vistos.add(grupo)
+            linhas_grupo.append(len(linhas_tabela))
+            linhas_tabela.append([html.escape(str(grupo).upper())] + [""] * 6)
 
         dias_unicos = sorted(
-            {d.day for d in (para_data(x) for x in df_local["Data"].unique()) if d}
-        )
-        legenda = (
-            f"<b>{html.escape(local)}</b> — {len(dias_unicos)} dia(s) de exame:"
-            f" {formatar_datas_exames(dias_unicos)} — {total_local} vagas"
+            {
+                d.day
+                for d in (para_data(x) for x in df_local["Data"].unique())
+                if d
+            }
         )
 
-        linha_legenda = [Paragraph(legenda, estilos["local"])] + [""] * (len(cabecalho) - 1)
-        tabela = Table(
-            [linha_legenda, cabecalho] + linhas,
-            repeatRows=2,
-            colWidths=_larguras_proporcionais(len(cabecalho)),
-        )
-        # O índice das linhas de destaque sobe uma posição porque a legenda
-        # agora faz parte da própria tabela.
-        destaques_tabela = [i + 1 for i in destaques_relativos]
-        estilo_tabela = _estilo_tabela_padrao(destaques_tabela)
-        estilo_tabela.add("BACKGROUND", (0, 1), (-1, 1), colors.HexColor(COR_PRIMARIA))
-        estilo_tabela.add("TEXTCOLOR", (0, 1), (-1, 1), colors.whitesmoke)
-        estilo_tabela.add("FONTNAME", (0, 1), (-1, 1), "Helvetica-Bold")
-        estilo_tabela.add("ALIGN", (0, 1), (-1, 1), "CENTER")
-        estilo_tabela.add("SPAN", (0, 0), (-1, 0))
-        estilo_tabela.add("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#EDF2F7"))
-        estilo_tabela.add("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor(COR_SECUNDARIA))
-        estilo_tabela.add("ALIGN", (0, 0), (-1, 0), "LEFT")
-        estilo_tabela.add("TOPPADDING", (0, 0), (-1, 0), 4)
-        estilo_tabela.add("BOTTOMPADDING", (0, 0), (-1, 0), 4)
-        # A linha de total geral se destaca mais que os subtotais por data.
-        indice_total_tabela = indice_total_geral + 1
-        estilo_tabela.add(
-            "BACKGROUND",
-            (0, indice_total_tabela),
-            (-1, indice_total_tabela),
-            colors.HexColor(COR_SECUNDARIA),
-        )
-        estilo_tabela.add(
-            "TEXTCOLOR", (0, indice_total_tabela), (-1, indice_total_tabela), colors.white
-        )
-        tabela.setStyle(estilo_tabela)
-        elementos.append(tabela)
+        valores = []
+        total_local = 0
+        for coluna in COLS_CATEGORIA:
+            valor = _num(df_local[coluna].fillna(0).sum()) if coluna in df_local.columns else 0
+            valores.append(_texto_ou_traco(valor))
+            total_banca[coluna] += valor
+            total_local += valor
 
-    if not houve_conteudo:
+        total_geral += total_local
+        datas = formatar_datas_exames(dias_unicos)
+
+        linhas_tabela.append(
+            [
+                Paragraph(html.escape(str(local)), estilos["corpo"]),
+                valores[0],
+                valores[1],
+                valores[2],
+                valores[3],
+                valores[4],
+                Paragraph(html.escape(datas), estilos["corpo"]),
+            ]
+        )
+
+    if not houve:
         elementos.append(
             Paragraph(
-                "<b>Nenhuma vaga lançada nesta banca para o mês selecionado.</b>",
+                "<b>Nenhuma vaga ofertada para as localidades da banca no mês selecionado.</b>",
                 estilos["subtitulo"],
             )
         )
         documento.build(elementos)
         return buffer.getvalue()
 
-    # Painel de efetivo diário da banca no mês.
-    elementos.append(PageBreak())
-    elementos.append(
-        Paragraph("CONFERÊNCIA DE EFETIVO DIÁRIO", estilos["grupo"])
+    cabecalho = [
+        "Cidade",
+        "Cat A",
+        "Cat B",
+        "Cat C",
+        "Cat D",
+        "Cat E",
+        "Datas dos exames",
+    ]
+
+    # Totais seguem o padrão visual da planilha de publicação: linha final
+    # compacta e imediatamente legível.
+    linha_total = [
+        "TOTAL DA BANCA",
+        *[_texto_ou_traco(total_banca[c]) for c in COLS_CATEGORIA],
+        f"{total_geral} vagas",
+    ]
+    indice_total = len(linhas_tabela)
+    linhas_tabela.append(linha_total)
+
+    tabela = Table(
+        [cabecalho] + linhas_tabela,
+        repeatRows=1,
+        colWidths=[180, 52, 52, 52, 52, 52, 320],
     )
-    tabela_efetivo = _tabela_efetivo_mensal(
-        dados_por_local, viagens, banca, ano, mes_numero, efetivo_maximo
+
+    estilo = TableStyle(
+        [
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(COR_PRIMARIA)),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, -1), 8),
+            ("ALIGN", (1, 1), (5, -1), "CENTER"),
+            ("ALIGN", (0, 1), (0, -1), "LEFT"),
+            ("ALIGN", (6, 1), (6, -1), "CENTER"),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("GRID", (0, 0), (-1, -1), 0.45, colors.grey),
+            ("TOPPADDING", (0, 0), (-1, -1), 4),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+            ("LEFTPADDING", (0, 0), (-1, -1), 5),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+            ("BACKGROUND", (0, indice_total), (-1, indice_total), colors.HexColor(COR_SECUNDARIA)),
+            ("TEXTCOLOR", (0, indice_total), (-1, indice_total), colors.white),
+            ("FONTNAME", (0, indice_total), (-1, indice_total), "Helvetica-Bold"),
+        ]
     )
-    if tabela_efetivo:
-        elementos.append(tabela_efetivo)
-    elementos.append(Spacer(1, 6))
+
+    # Grupos ocupam a largura inteira da tabela e funcionam como os blocos
+    # visuais da planilha de referência.
+    for idx in linhas_grupo:
+        tabela_group_row = idx + 1  # +1 pelo cabeçalho
+        estilo.add("SPAN", (0, tabela_group_row), (-1, tabela_group_row))
+        estilo.add(
+            "BACKGROUND",
+            (0, tabela_group_row),
+            (-1, tabela_group_row),
+            colors.HexColor("#E9EEF5"),
+        )
+        estilo.add(
+            "TEXTCOLOR",
+            (0, tabela_group_row),
+            (-1, tabela_group_row),
+            colors.HexColor(COR_SECUNDARIA),
+        )
+        estilo.add("FONTNAME", (0, tabela_group_row), (-1, tabela_group_row), "Helvetica-Bold")
+        estilo.add("ALIGN", (0, tabela_group_row), (-1, tabela_group_row), "LEFT")
+
+    tabela.setStyle(estilo)
+    elementos.append(tabela)
+    elementos.append(Spacer(1, 8))
+
     elementos.append(
         Paragraph(
-            f"Total geral de vagas da banca no mês: <b>{total_geral}</b>."
-            " Documento gerado para conferência interna em "
-            f"{datetime.datetime.now().strftime('%d/%m/%Y às %H:%M')}.",
+            f"<b>Total da banca:</b> {total_geral} vagas · "
+            f"Cat A: {total_banca['Cat A']} · "
+            f"Cat B: {total_banca['Cat B']} · "
+            f"Cat C: {total_banca['Cat C']} · "
+            f"Cat D: {total_banca['Cat D']} · "
+            f"Cat E: {total_banca['Cat E']}",
+            estilos["corpo"],
+        )
+    )
+    elementos.append(Spacer(1, 4))
+    elementos.append(
+        Paragraph(
+            "Documento-resumo para publicação. Para conferência operacional "
+            "horário a horário, utilize o PDF detalhado de cada localidade. "
+            f"Gerado em {datetime.datetime.now().strftime('%d/%m/%Y às %H:%M')}.",
             estilos["nota"],
         )
     )
 
     documento.build(elementos)
     return buffer.getvalue()
-
-
-def _larguras_proporcionais(quantidade_colunas: int) -> list[float]:
-    """Primeira coluna um pouco maior; o resto divide o espaço restante."""
-    if quantidade_colunas <= 0:
-        return []
-    primeira = 52
-    horarios = 62
-    restante = LARGURA_UTIL_A4_PAISAGEM - primeira - horarios - 28
-    demais = max(restante / max(quantidade_colunas - 3, 1), 26)
-    larguras = [primeira, 28, horarios] + [demais] * (quantidade_colunas - 3)
-    return larguras[:quantidade_colunas]
-
-
-def _tabela_efetivo_mensal(
-    dados_por_local: dict[str, pd.DataFrame],
-    viagens: Sequence[Viagem],
-    banca: str,
-    ano: int,
-    mes_numero: int,
-    efetivo_maximo: int,
-) -> Table | None:
-    """Manhã, tarde e pico de examinadores por dia útil do mês."""
-    totais: dict[datetime.date, dict[str, int]] = {}
-
-    for local, df in dados_por_local.items():
-        disponiveis = _apenas_disponiveis(df)
-        if disponiveis.empty:
-            continue
-        for data_texto, grupo in disponiveis.groupby("Data"):
-            data = para_data(data_texto)
-            if not data:
-                continue
-            acumulado = totais.setdefault(data, {"M": 0, "T": 0})
-            em_viagem_m = viagem_do_local(viagens, banca, local, data, TURNO_MANHA)
-            em_viagem_t = viagem_do_local(viagens, banca, local, data, TURNO_TARDE)
-            if not em_viagem_m:
-                acumulado["M"] += _num(grupo["Exam. M"].max())
-            if not em_viagem_t:
-                acumulado["T"] += _num(grupo["Exam. T"].max())
-
-    for numero_dia in range(1, calendar.monthrange(ano, mes_numero)[1] + 1):
-        data = datetime.date(ano, mes_numero, numero_dia)
-        manha, tarde = efetivo_em_viagem(viagens, banca, data)
-        if manha or tarde:
-            acumulado = totais.setdefault(data, {"M": 0, "T": 0})
-            acumulado["M"] += manha
-            acumulado["T"] += tarde
-
-    if not totais:
-        return None
-
-    linhas = [["Data", "Dia", "Manhã", "Tarde", "Pico", "Limite", "Folga"]]
-    destaques = []
-    for data in sorted(totais):
-        valores = totais[data]
-        pico = pico_diario(valores["M"], valores["T"])
-        linhas.append(
-            [
-                formatar_br(data),
-                nome_dia_semana(data)[:3],
-                str(valores["M"]),
-                str(valores["T"]),
-                str(pico),
-                str(efetivo_maximo),
-                str(efetivo_maximo - pico),
-            ]
-        )
-        if pico > efetivo_maximo:
-            destaques.append(len(linhas) - 1)
-
-    tabela = Table(linhas, repeatRows=1)
-    estilo = _estilo_tabela_padrao()
-    for indice in destaques:
-        estilo.add("BACKGROUND", (0, indice), (-1, indice), colors.HexColor("#FED7D7"))
-        estilo.add("TEXTCOLOR", (0, indice), (-1, indice), colors.HexColor(COR_ALERTA))
-    tabela.setStyle(estilo)
-    return tabela
 
 
 # --- PDF: resumo semanal do quadro de examinadores --------------------------
@@ -3149,6 +3116,9 @@ def validar_capacidade_por_horario(
 
     O mesmo efetivo é compartilhado entre 08:30, 08:31, 08:32 e 08:40,
     portanto horários quebrados são avaliados juntos no horário principal.
+
+    Regra operacional: A usa blocos de 02 examinadores/12 vagas (limitados
+    pelas pistas); B/C/D/E usam 01 examinador/02 vagas.
     """
     if df is None or df.empty:
         return df.copy() if df is not None else pd.DataFrame()
@@ -3415,16 +3385,25 @@ def gerar_sugestao_automatica(
             if cap <= 0:
                 break
 
-            # Distribui a meta de forma equilibrada: o próximo lançamento não
-            # recebe mais que o necessário para manter os candidatos próximos.
-            quantidade_slots = max(1, len(candidatos))
-            alvo = (restantes[categoria] + quantidade_slots - 1) // quantidade_slots
-            vagas = min(restantes[categoria], cap, max(1, alvo))
-
-            # Para A, uma dupla trabalha em blocos de até 12. Não deixamos
-            # quantidade impossível de acomodar pelo número de examinadores.
-            if categoria == "Cat A" and vagas > 12:
-                vagas = 12
+            # A categoria A trabalha em blocos operacionais de 12 vagas
+            # (02 examinadores por bloco). Não fracionamos um bloco de A
+            # apenas para espalhar a meta: primeiro ocupamos a capacidade
+            # real do bloco e só passamos ao próximo horário.
+            if categoria == "Cat A":
+                bloco_a = 12
+                if grupo["base"] == "11:30":
+                    bloco_a = min(12, cap)
+                vagas = min(restantes[categoria], cap, bloco_a)
+                if vagas < 12 and grupo["base"] != "11:30" and restantes[categoria] >= 12:
+                    vagas = 0
+            else:
+                quantidade_slots = max(1, len(candidatos))
+                alvo = (restantes[categoria] + quantidade_slots - 1) // quantidade_slots
+                # B/C/D/E operam em blocos de 02 exames por examinador.
+                # Priorizamos blocos completos para não desperdiçar efetivo.
+                if categoria in CATEGORIAS_BLOCO_2_EXAM and alvo > 1:
+                    alvo = max(2, alvo - (alvo % 2))
+                vagas = min(restantes[categoria], cap, max(1, alvo))
 
             while vagas > 0:
                 req = examinadores_necessarios_categoria(
