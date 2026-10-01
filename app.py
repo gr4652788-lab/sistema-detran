@@ -318,7 +318,69 @@ div[data-testid="stMetric"] {
     padding: 10px 16px;
 }
 .stTabs [aria-selected="true"] { background-color: #1A365D !important; color: white !important; }
-.stButton>button { border-radius: 6px; font-weight: 600; }
+.stButton>button {
+    border-radius: 10px;
+    font-weight: 700;
+    border: 1px solid #CBD5E0;
+    transition: all .15s ease;
+}
+.stButton>button:hover {
+    border-color: #2B6CB0;
+    box-shadow: 0 4px 12px rgba(43,108,176,.14);
+}
+section[data-testid="stSidebar"] {
+    border-right: 1px solid #E2E8F0;
+}
+section[data-testid="stSidebar"] > div {
+    padding-top: 1rem;
+}
+div[data-testid="stExpander"] {
+    border: 1px solid #E2E8F0;
+    border-radius: 12px;
+    background: #FFFFFF;
+    margin-bottom: 10px;
+}
+div[data-testid="stMetric"] {
+    min-height: 92px;
+}
+.calendar-hero {
+    background: linear-gradient(135deg, #F7FAFC 0%, #EBF8FF 100%);
+    border: 1px solid #D9EAF7;
+    border-radius: 16px;
+    padding: 18px 22px;
+    margin: 8px 0 18px 0;
+    box-shadow: 0 4px 14px rgba(26,54,93,.06);
+}
+.calendar-hero .eyebrow {
+    color: #2B6CB0;
+    font-size: 12px;
+    font-weight: 800;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    margin-bottom: 5px;
+}
+.calendar-hero .title {
+    color: #1A365D;
+    font-size: 24px;
+    font-weight: 800;
+    margin: 0;
+}
+.calendar-hero .subtitle {
+    color: #4A5568;
+    font-size: 13px;
+    margin-top: 5px;
+}
+.section-chip {
+    display: inline-block;
+    background: #EBF8FF;
+    color: #2B6CB0;
+    border: 1px solid #BEE3F8;
+    border-radius: 999px;
+    padding: 5px 10px;
+    font-size: 12px;
+    font-weight: 700;
+    margin-right: 6px;
+}
 </style>
 """
 
@@ -1967,6 +2029,9 @@ def _linhas_grade_detalhada(
                     linha.append(html.escape(str(valor)))
             linhas.append(linha)
 
+        # O rótulo do subtotal ocupa as duas primeiras células da tabela.
+        # Isso evita que "TOTAL DD/MM/AAAA" escape visualmente para fora da célula
+        # quando a coluna Data estiver estreita.
         subtotal = [f"TOTAL {data_valor}", "", "SUBTOTAL", "-", "-", "-"]
         for coluna in COLS_CATEGORIA + pcd_usadas:
             subtotal.append(_texto_ou_traco(int(grupo[coluna].fillna(0).sum())))
@@ -2038,6 +2103,10 @@ def gerar_pdf_localidade(
     estilo.add("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#EDF2F7"))
     estilo.add("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor(COR_SECUNDARIA))
     estilo.add("ALIGN", (0, 0), (-1, 0), "LEFT")
+    # Cada subtotal usa as duas primeiras células para acomodar o texto inteiro.
+    for idx in destaques:
+        estilo.add("SPAN", (0, idx + 1), (1, idx + 1))
+        estilo.add("ALIGN", (0, idx + 1), (1, idx + 1), "LEFT")
     estilo.add("TOPPADDING", (0, 0), (-1, 0), 4)
     estilo.add("BOTTOMPADDING", (0, 0), (-1, 0), 4)
     tabela.setStyle(estilo)
@@ -2115,7 +2184,9 @@ def gerar_pdf_banca(
 
         # Uma linha de total geral da localidade, além dos subtotais por
         # data: dá o resumo rápido sem perder o detalhe linha a linha.
-        rodape = [f"TOTAL GERAL — {local}".upper(), "", "", "-", "-", "-"]
+        # O total geral ocupa toda a faixa descritiva (Data → Horário).
+        # As colunas de categoria permanecem separadas para mostrar os totais.
+        rodape = [f"TOTAL GERAL — {local}".upper()] + [""] * 5
         for coluna in COLS_CATEGORIA + pcd_usadas:
             rodape.append(_texto_ou_traco(int(df_local[coluna].fillna(0).sum())))
         rodape.append(str(total_local))
@@ -2162,6 +2233,14 @@ def gerar_pdf_banca(
         estilo_tabela.add(
             "TEXTCOLOR", (0, indice_total_tabela), (-1, indice_total_tabela), colors.white
         )
+        # O rótulo do total geral ocupa a faixa descritiva inteira e nunca
+        # transborda para as colunas de categoria.
+        estilo_tabela.add("SPAN", (0, indice_total_tabela), (5, indice_total_tabela))
+        estilo_tabela.add("ALIGN", (0, indice_total_tabela), (5, indice_total_tabela), "LEFT")
+        for idx in destaques:
+            linha_pdf = idx + 1
+            estilo_tabela.add("SPAN", (0, linha_pdf), (1, linha_pdf))
+            estilo_tabela.add("ALIGN", (0, linha_pdf), (1, linha_pdf), "LEFT")
         tabela.setStyle(estilo_tabela)
         elementos.append(tabela)
 
@@ -3341,9 +3420,10 @@ def gerar_sugestao_automatica(
     extras = set()
 
     def linha_destino(grupo, categoria):
-        destino = grupo["base"]
-        if categoria in DESLOCAMENTOS_CATEGORIA and soma_categoria(grupo, "Cat B") > 0:
-            destino = horario_com_deslocamento(grupo["base"], categoria)
+        # C/D/E sempre recebem horário próprio, até quando B não foi
+        # lançado naquele slot. O efetivo, entretanto, continua compartilhado
+        # pelo horário-base através de horario_base().
+        destino = horario_com_deslocamento(grupo["base"], categoria)
         idxs = trabalho.index[
             (trabalho["Data"] == grupo["data_texto"]) &
             (trabalho["Horário"] == destino)
@@ -4063,9 +4143,12 @@ def aba_calendario() -> None:
         extras_salvos = []
 
     with st.sidebar.expander("🤖 Gerador Automático por Capacidade", expanded=True):
-        st.caption(
-            "Informe o efetivo e as metas mensais. O sistema distribui as vagas "
-            "automaticamente e deixa o calendário totalmente editável depois."
+        st.markdown(
+            '<div style="background:#F7FAFC;border:1px solid #E2E8F0;border-radius:10px;padding:10px 12px;">'
+            '<b>⚙️ Configuração da sugestão</b><br>'
+            '<span style="color:#718096;font-size:12px;">Defina efetivo, pistas, metas, dias e horário. '
+            'A grade gerada permanece totalmente editável.</span></div>',
+            unsafe_allow_html=True,
         )
         examinadores_auto = st.number_input(
             "Examinadores disponíveis por turno:",
@@ -4253,6 +4336,41 @@ def aba_calendario() -> None:
     df_completo = validar_capacidade_por_horario(
         df_completo, efetivo_validacao, pistas_validacao
     )
+
+    # Painel visual da localidade: concentra as informações que o operador
+    # precisa enxergar antes de editar a grade, sem esconder nenhuma função.
+    metas_painel = regra_atual.get("metas", {}) if isinstance(regra_atual, dict) else {}
+    meta_total_painel = sum(int(metas_painel.get(c, 0) or 0) for c in CATEGORIAS_AUTO)
+    vagas_atuais_painel = int(pd.to_numeric(df_completo["Total"], errors="coerce").fillna(0).sum())
+    excesso_painel = int((df_completo["Alerta Capacidade"].astype(str).str.startswith("EXCESSO")).sum())
+
+    st.markdown(
+        f"""
+        <div class="calendar-hero">
+            <div class="eyebrow">Planejamento operacional</div>
+            <div class="title">📅 {html.escape(str(local))}</div>
+            <div class="subtitle">
+                {html.escape(str(banca))} · {html.escape(str(mes_nome))}/{ano}
+                &nbsp;•&nbsp; distribuição por capacidade de examinadores
+            </div>
+            <div style="margin-top:10px;">
+                <span class="section-chip">👨‍⚖️ {efetivo_validacao} examinadores</span>
+                <span class="section-chip">🏁 {pistas_validacao} pista(s) A</span>
+                <span class="section-chip">🎯 Meta: {meta_total_painel} vagas</span>
+                <span class="section-chip">📌 Lançadas: {vagas_atuais_painel}</span>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Examinadores disponíveis", efetivo_validacao)
+    m2.metric("Pistas Cat. A", pistas_validacao)
+    m3.metric("Vagas na grade", vagas_atuais_painel)
+    if excesso_painel:
+        m4.metric("Alertas de capacidade", excesso_painel)
+    else:
+        m4.metric("Alertas de capacidade", "OK")
 
     _calendario_visual(banca, local, ano, mes_numero, feriados, chave)
 
